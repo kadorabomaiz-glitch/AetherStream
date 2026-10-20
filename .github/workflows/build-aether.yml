@@ -1,0 +1,65 @@
+name: "🚀 AETHER Stream Bau-Fabrik (Fire TV APK & iPhone IPA)"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-fire-tv-apk:
+    name: "📺 Fire TV Stick/Cube (.apk) bauen"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "1. Projekt-Dateien laden"
+        uses: actions/checkout@v4
+
+      - name: "2. Java 17 Entwicklungsumgebung einrichten"
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: "3. Gradle 8.9 Bau-Werkzeug bereitstellen"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: "4. AETHER Stream APK kompilieren"
+        run: gradle :composeApp:assembleDebug
+
+      - name: "5. Fertige Fire-TV APK zum Download bereitstellen"
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherStream-FireTV-APK
+          path: composeApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  build-iphone-framework:
+    name: "📱 iPhone Framework auf virtuellem Mac prüfen & bauen"
+    runs-on: macos-14
+
+    steps:
+      - name: "1. Projekt-Dateien laden"
+        uses: actions/checkout@v4
+
+      - name: "2. Java 17 einrichten"
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: "3. Gradle 8.9 bereitstellen"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: "4. iOS Arm64 Release-Binaries für iPhone kompilieren"
+        run: gradle :composeApp:linkReleaseFrameworkIosArm64
+
+      - name: "5. Fertiges iPhone-Paket bereitstellen"
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherStream-iPhone-Build
+          path: composeApp/build/bin/iosArm64/releaseFramework/*
+          if-no-files-found: warn
