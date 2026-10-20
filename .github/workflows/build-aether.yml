@@ -14,21 +14,19 @@ jobs:
       - name: "1. Projekt-Dateien laden"
         uses: actions/checkout@v4
 
-      - name: "2. Java 17 Entwicklungsumgebung einrichten"
+      - name: "2. Java 17 einrichten"
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: "3. Gradle 8.9 Bau-Werkzeug bereitstellen"
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.9'
+      - name: "3. Gradle Wrapper initialisieren"
+        run: gradle wrapper --gradle-version 8.9
 
       - name: "4. AETHER Stream APK kompilieren"
-        run: gradle :composeApp:assembleDebug
+        run: ./gradlew :composeApp:assembleDebug --no-daemon
 
-      - name: "5. Fertige Fire-TV APK zum Download bereitstellen"
+      - name: "5. Fertige Fire-TV APK bereitstellen"
         uses: actions/upload-artifact@v4
         with:
           name: AetherStream-FireTV-APK
@@ -49,13 +47,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: "3. Gradle 8.9 bereitstellen"
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.9'
+      - name: "3. Gradle Wrapper initialisieren"
+        run: gradle wrapper --gradle-version 8.9
 
-      - name: "4. iOS Arm64 Release-Binaries für iPhone kompilieren"
-        run: gradle :composeApp:linkReleaseFrameworkIosArm64
+      - name: "4. iOS Arm64 Release-Binaries kompilieren"
+        run: ./gradlew :composeApp:linkReleaseFrameworkIosArm64 --no-daemon
 
       - name: "5. Fertiges iPhone-Paket bereitstellen"
         uses: actions/upload-artifact@v4
