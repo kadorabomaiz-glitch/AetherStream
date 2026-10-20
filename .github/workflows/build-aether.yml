@@ -20,11 +20,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: "3. Gradle Wrapper initialisieren"
-        run: gradle wrapper --gradle-version 8.9
+      - name: "3. Gradle installieren"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
 
-      - name: "4. AETHER Stream APK kompilieren"
-        run: ./gradlew :composeApp:assembleDebug --no-daemon
+      - name: "4. Gradle Wrapper generieren & APK bauen"
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew :composeApp:assembleDebug --no-daemon
 
       - name: "5. Fertige Fire-TV APK bereitstellen"
         uses: actions/upload-artifact@v4
@@ -47,11 +51,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: "3. Gradle Wrapper initialisieren"
-        run: gradle wrapper --gradle-version 8.9
+      - name: "3. Gradle installieren"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
 
-      - name: "4. iOS Arm64 Release-Binaries kompilieren"
-        run: ./gradlew :composeApp:linkReleaseFrameworkIosArm64 --no-daemon
+      - name: "4. Gradle Wrapper generieren & iOS Framework bauen"
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew :composeApp:linkReleaseFrameworkIosArm64 --no-daemon
 
       - name: "5. Fertiges iPhone-Paket bereitstellen"
         uses: actions/upload-artifact@v4
