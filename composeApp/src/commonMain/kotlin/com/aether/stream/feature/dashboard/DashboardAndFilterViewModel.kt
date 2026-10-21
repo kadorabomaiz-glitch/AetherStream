@@ -41,7 +41,7 @@ class DashboardAndFilterViewModel(
     val uiState: StateFlow<FilterTreeUiState> = _uiState.asStateFlow()
 
     val activePlaylist: StateFlow<PlaylistEntity?> = dao.observeActivePlaylist()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val newlyDiscoveredGroupsCount: StateFlow<Int> = activePlaylist
         .flatMapLatest { playlist ->
@@ -84,10 +84,10 @@ class DashboardAndFilterViewModel(
     }
 
     fun triggerManualSync() {
-        val playlist = activePlaylist.value ?: return
-        if (_uiState.value.isSyncingInBackground) return
-
         viewModelScope.launch {
+            val playlist = activePlaylist.value ?: dao.getActivePlaylistOnce() ?: return@launch
+            if (_uiState.value.isSyncingInBackground) return@launch
+
             _uiState.update {
                 it.copy(isSyncingInBackground = true, lastSyncMessage = "Synchronisiere Playlist & EPG...")
             }

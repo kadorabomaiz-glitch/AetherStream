@@ -13,7 +13,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -71,6 +70,7 @@ fun AetherFocusableGlassCard(
 ) {
     val aetherColors = LocalAetherColors.current
     var isFocused by remember { mutableStateOf(false) }
+    var centerKeyDownTimestamp by remember { mutableLongStateOf(0L) }
     val interactionSource = remember { MutableInteractionSource() }
 
     val scale by animateFloatAsState(
@@ -121,13 +121,35 @@ fun AetherFocusableGlassCard(
             .border(BorderStroke(borderWidth, borderColor), shape)
             .onFocusChanged { focusState ->
                 isFocused = focusState.isFocused
+                if (!focusState.isFocused) {
+                    centerKeyDownTimestamp = 0L
+                }
             }
             .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp &&
-                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
-                ) {
-                    onClick()
-                    true
+                if (event.key == Key.DirectionCenter || event.key == Key.Enter) {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            if (centerKeyDownTimestamp == 0L) {
+                                centerKeyDownTimestamp = Clock.System.now().toEpochMilliseconds()
+                            }
+                            true
+                        }
+                        KeyEventType.KeyUp -> {
+                            val downTime = centerKeyDownTimestamp
+                            centerKeyDownTimestamp = 0L
+                            val heldDuration = if (downTime > 0L) {
+                                Clock.System.now().toEpochMilliseconds() - downTime
+                            } else 0L
+
+                            if (heldDuration >= 550L && onLongClick != null) {
+                                onLongClick()
+                            } else {
+                                onClick()
+                            }
+                            true
+                        }
+                        else -> false
+                    }
                 } else {
                     false
                 }
@@ -137,8 +159,7 @@ fun AetherFocusableGlassCard(
                 indication = null,
                 onClick = onClick,
                 onLongClick = onLongClick
-            )
-            .focusable(interactionSource = interactionSource),
+            ),
         content = { content(isFocused) }
     )
 }
