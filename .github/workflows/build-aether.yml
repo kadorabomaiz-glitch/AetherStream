@@ -1,4 +1,4 @@
-name: "🚀 AETHER Stream Bau-Fabrik"
+name: "🚀 AETHER Stream Bau-Fabrik (Fire TV & iPhone)"
 
 on:
   workflow_dispatch:
@@ -20,15 +20,137 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: "Gradle Wrapper erzeugen"
-        run: gradle wrapper --gradle-version 8.9
+      - name: "Gradle installieren"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
 
       - name: "APK kompilieren"
-        run: ./gradlew assembleDebug --no-daemon
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew :composeApp:assembleDebug --no-daemon
 
       - name: "APK als Artefakt speichern"
         uses: actions/upload-artifact@v4
         with:
           name: AetherStream-FireTV-APK
           path: composeApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  build-iphone-ipa:
+    name: "📱 iPhone IPA auf virtuellem Mac bauen"
+    runs-on: macos-14
+
+    steps:
+      - name: "Projekt-Dateien laden"
+        uses: actions/checkout@v4
+
+      - name: "Java 17 einrichten"
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: "Gradle installieren"
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: "1. Kotlin Multiplatform iOS-Framework bauen"
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew :composeApp:linkReleaseFrameworkIosArm64 --no-daemon
+
+      - name: "2. Installierbare iPhone .IPA Datei schnüren"
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          FW_DIR="composeApp/build/bin/iosArm64/releaseFramework"
+          mkdir -p build_ipa/Payload/AetherStream.app
+
+          cat << 'EOF' > AppMain.swift
+          import UIKit
+          import ComposeApp
+
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              func application(
+                  _ application: UIApplication,
+                  didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+              ) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = MainViewControllerKt.MainViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+          EOF
+
+          xcrun --sdk iphoneos swiftc AppMain.swift \
+            -sdk "$SDK_PATH" \
+            -target arm64-apple-ios15.0 \
+            -F "$FW_DIR" \
+            -framework ComposeApp \
+            -framework UIKit \
+            -framework Foundation \
+            -framework AVFoundation \
+            -framework CoreMedia \
+            -framework QuartzCore \
+            -framework CoreGraphics \
+            -framework Metal \
+            -lsqlite3 \
+            -lc++ \
+            -o build_ipa/Payload/AetherStream.app/AetherStream
+
+          cat << 'EOF' > build_ipa/Payload/AetherStream.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>AetherStream</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.aether.stream</string>
+              <key>CFBundleName</key>
+              <string>AETHER Stream</string>
+              <key>CFBundleDisplayName</key>
+              <string>AETHER Stream</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UIRequiresFullScreen</key>
+              <true/>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <key>NSAllowsArbitraryLoads</key>
+                  <true/>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --sign - build_ipa/Payload/AetherStream.app
+          cd build_ipa
+          zip -r ../AetherStream-iPhone.ipa Payload
+
+      - name: "3. Fertige iPhone IPA als Artefakt speichern"
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherStream-iPhone-IPA
+          path: AetherStream-iPhone.ipa
           if-no-files-found: error
