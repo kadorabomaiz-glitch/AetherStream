@@ -11,7 +11,7 @@ object AetherCryptoEngine {
     fun getFormattedDeviceId(): String {
         val rawSeed = getPlatformHardwareSeed()
         val hash = fnv1a64(rawSeed + SECRET_PEPPER)
-        val fourDigitNumber = ((hash ushr 16) % 9000UL + 1000UL).toInt()
+        val fourDigitNumber = ((hash shr 16) % 9000UL + 1000UL).toInt()
         return "AETH-$fourDigitNumber"
     }
 
@@ -60,16 +60,16 @@ object AetherCryptoEngine {
         for ((index, ch) in input.withIndex()) {
             val v = ch.code.toULong() + (index.toULong() * 31UL)
             h1 = (h1 xor v) * 0xBF58476D1CE4E5B9UL
-            h1 = (h1 shl 13) or (h1 ushr 51)
+            h1 = (h1 shl 13) or (h1 shr 51)
             h2 = (h2 + h1) * 0x94D049BB133111EBUL
-            h2 = (h2 shl 17) or (h2 ushr 47)
+            h2 = (h2 shl 17) or (h2 shr 47)
         }
 
         val combined = h1 xor h2
         val chars = "0123456789ABCDEF"
         val sb = StringBuilder(8)
         for (i in 0 until 8) {
-            val nibble = ((combined ushr (i * 8)) and 0x0FUL).toInt()
+            val nibble = ((combined shr (i * 8)) and 0x0FUL).toInt()
             sb.append(chars[nibble])
         }
         return sb.toString()
