@@ -1,11 +1,13 @@
 package com.aether.stream.data.local
 
+import androidx.room.ConstructedBy
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.RoomDatabaseConstructor
 import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
@@ -188,6 +190,11 @@ interface AetherDao {
     ): Flow<List<StreamItemEntity>>
 }
 
+@Suppress("NO_ACTUAL_FOR_EXPECT")
+expect object AetherDatabaseConstructor : RoomDatabaseConstructor<AetherDatabase> {
+    override fun initialize(): AetherDatabase
+}
+
 @Database(
     entities = [
         PlaylistEntity::class,
@@ -200,6 +207,7 @@ interface AetherDao {
     version = 1,
     exportSchema = false
 )
+@ConstructedBy(AetherDatabaseConstructor::class)
 abstract class AetherDatabase : RoomDatabase() {
     abstract fun aetherDao(): AetherDao
 }
