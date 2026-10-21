@@ -86,7 +86,7 @@ jobs:
           }
           EOF
 
-          xcrun --sdk iphoneos swiftc AppMain.swift \
+          xcrun --sdk iphoneos swiftc -parse-as-library AppMain.swift \
             -sdk "$SDK_PATH" \
             -target arm64-apple-ios15.0 \
             -F "$FW_DIR" \
@@ -97,8 +97,15 @@ jobs:
             -framework CoreMedia \
             -framework QuartzCore \
             -framework CoreGraphics \
+            -framework CoreText \
+            -framework Security \
+            -framework CFNetwork \
+            -framework AudioToolbox \
             -framework Metal \
+            -framework OpenGLES \
+            -framework IOSurface \
             -lsqlite3 \
+            -lz \
             -lc++ \
             -o build_ipa/Payload/AetherStream.app/AetherStream
 
