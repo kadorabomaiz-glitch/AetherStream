@@ -19,6 +19,13 @@ kotlin {
         }
     }
 
+    iosArm64 {
+        binaries.framework {
+            baseName = "ComposeApp"
+            isStatic = true
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -46,6 +53,10 @@ kotlin {
             implementation(libs.media3.ui)
             implementation(libs.media3.common)
         }
+
+        iosMain.dependencies {
+            implementation(libs.ktor.client.darwin)
+        }
     }
 }
 
@@ -72,4 +83,5 @@ room {
 
 dependencies {
     add("kspAndroid", libs.room.compiler)
+    add("kspIosArm64", libs.room.compiler)
 }
