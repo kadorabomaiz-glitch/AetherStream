@@ -11,7 +11,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.room.Room
-import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.aether.stream.core.navigation.AetherNavigationViewModel
 import com.aether.stream.core.navigation.AetherScreen
 import com.aether.stream.data.local.AetherDatabase
@@ -35,12 +34,16 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val prefs = getSharedPreferences("aether_device_prefs", Context.MODE_PRIVATE)
+
+        // 1. Ordner auf Fire OS vor dem allerersten Start anlegen (verhindert Blackscreen-Crash!)
         val dbFile = applicationContext.getDatabasePath("aether_stream.db")
+        dbFile.parentFile?.mkdirs()
+
+        // 2. Nativer Android-Treiber (100% stabil auf Fire TV Cube)
         val database = Room.databaseBuilder<AetherDatabase>(
             context = applicationContext,
-            name = dbFile.absolutePath
+            name = "aether_stream.db"
         )
-            .setDriver(BundledSQLiteDriver())
             .setQueryCoroutineContext(Dispatchers.IO)
             .build()
 
@@ -67,7 +70,6 @@ class MainActivity : ComponentActivity() {
             val dashboardViewModel = viewModel { DashboardAndFilterViewModel(dao, syncRepository) }
             val navState by navViewModel.uiState.collectAsState()
 
-            // Prüft beim Start, ob dieses Gerät bereits mit dem Code freigeschaltet wurde
             LaunchedEffect(Unit) {
                 val alreadyUnlocked = prefs.getBoolean("is_device_unlocked", false)
                 val existingPlaylist = dao.getActivePlaylistOnce()
@@ -80,14 +82,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Speichert dauerhaft auf dem Fire TV Stick, sobald der Code einmal richtig eingegeben wurde
             LaunchedEffect(navState.currentScreen) {
                 if (navState.currentScreen !is AetherScreen.GatekeeperLock) {
                     prefs.edit().putBoolean("is_device_unlocked", true).apply()
                 }
             }
 
-            // Verbindet die "Zurück"-Taste der Fire-TV-Fernbedienung mit unserer App-Navigation
             BackHandler(
                 enabled = navState.screenHistory.isNotEmpty() ||
                     navState.isAdminModalVisible ||
