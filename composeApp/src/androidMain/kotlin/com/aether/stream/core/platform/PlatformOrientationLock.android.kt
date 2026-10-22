@@ -1,19 +1,13 @@
 package com.aether.stream.core.platform
 
-import android.app.Activity
-import android.content.pm.ActivityInfo
 import android.os.Build
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.platform.LocalContext
 
 @Composable
 actual fun EnforceLandscapeCockpitMode() {
-    val context = LocalContext.current
-    SideEffect {
-        val activity = context as? Activity ?: return@SideEffect
-        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-    }
+    // Auf Fire TV / Android TV ist der Bildschirm physisch fest im 16:9-Querformat.
+    // Dynamische setRequestedOrientation-Aufrufe werfen auf Fire OS 7/8 im Fullscreen-Modus
+    // eine IllegalStateException und werden hier bewusst unterdrückt.
 }
 
 actual fun getPlatformHardwareSeed(): String {
