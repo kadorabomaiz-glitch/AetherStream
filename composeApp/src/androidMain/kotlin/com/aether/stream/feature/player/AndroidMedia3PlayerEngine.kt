@@ -49,7 +49,7 @@ class AndroidMedia3PlayerEngine(
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    // WICHTIG: playerListener MUSS VOR exoPlayer deklariert sein, damit er nicht null ist!
+    // 1. playerListener MUSS vor buildExoPlayer deklariert sein (behebt die NullPointerException!)
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
@@ -115,16 +115,17 @@ class AndroidMedia3PlayerEngine(
         exoPlayer.play()
     }
 
-    override fun seekRelativeMs(offsetMs: Long) {
+    // Hilfsfunktionen für Spulen und Position (ohne das fehlerhafte 'override')
+    fun seekRelativeMs(offsetMs: Long) {
         val duration = exoPlayer.duration
         if (duration <= 0L || duration == C.TIME_UNSET) return
         val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
         exoPlayer.seekTo(target)
     }
 
-    override fun getCurrentPositionMs(): Long = exoPlayer.currentPosition.coerceAtLeast(0L)
+    fun getCurrentPositionMs(): Long = exoPlayer.currentPosition.coerceAtLeast(0L)
 
-    override fun getDurationMs(): Long = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+    fun getDurationMs(): Long = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
 
     override fun applyBufferPreset(preset: StreamBufferPreset) {
         if (currentPreset == preset) return
