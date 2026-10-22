@@ -49,33 +49,7 @@ class AndroidMedia3PlayerEngine(
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    internal var exoPlayer: ExoPlayer = buildExoPlayer(currentPreset)
-        private set
-
-    private fun buildExoPlayer(preset: StreamBufferPreset): ExoPlayer {
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                preset.minBufferMs,
-                preset.maxBufferMs,
-                preset.playbackStartBufferMs,
-                preset.playbackStartBufferMs
-            )
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build()
-
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-            .setEnableDecoderFallback(true)
-
-        return ExoPlayer.Builder(context, renderersFactory)
-            .setLoadControl(loadControl)
-            .build()
-            .apply {
-                playWhenReady = true
-                addListener(playerListener)
-            }
-    }
-
+    // WICHTIG: playerListener MUSS VOR exoPlayer deklariert sein, damit er nicht null ist!
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
@@ -105,14 +79,52 @@ class AndroidMedia3PlayerEngine(
         }
     }
 
+    internal var exoPlayer: ExoPlayer = buildExoPlayer(currentPreset)
+        private set
+
+    private fun buildExoPlayer(preset: StreamBufferPreset): ExoPlayer {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                preset.minBufferMs,
+                preset.maxBufferMs,
+                preset.playbackStartBufferMs,
+                preset.playbackStartBufferMs
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+
+        return ExoPlayer.Builder(context, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
+            .apply {
+                playWhenReady = true
+                addListener(playerListener)
+            }
+    }
+
     override fun playStream(url: String, startPositionMs: Long) {
-        if (currentStreamUrl == url && exoPlayer.isPlaying) return
+        if (currentStreamUrl == url && exoPlayer.isPlaying && startPositionMs == 0L) return
         currentStreamUrl = url
         reconnectCount = 0
         exoPlayer.setMediaItem(MediaItem.fromUri(url), startPositionMs)
         exoPlayer.prepare()
         exoPlayer.play()
     }
+
+    override fun seekRelativeMs(offsetMs: Long) {
+        val duration = exoPlayer.duration
+        if (duration <= 0L || duration == C.TIME_UNSET) return
+        val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
+        exoPlayer.seekTo(target)
+    }
+
+    override fun getCurrentPositionMs(): Long = exoPlayer.currentPosition.coerceAtLeast(0L)
+
+    override fun getDurationMs(): Long = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
 
     override fun applyBufferPreset(preset: StreamBufferPreset) {
         if (currentPreset == preset) return
