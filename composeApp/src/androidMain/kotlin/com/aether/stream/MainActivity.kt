@@ -6,11 +6,27 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.aether.stream.core.navigation.AetherNavigationViewModel
 import com.aether.stream.core.navigation.AetherScreen
 import com.aether.stream.data.local.AetherDatabase
@@ -27,92 +43,141 @@ import kotlinx.serialization.json.Json
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var playerEngine: AndroidMedia3PlayerEngine
+    private var playerEngine: AndroidMedia3PlayerEngine? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val prefs = getSharedPreferences("aether_device_prefs", Context.MODE_PRIVATE)
+        var fatalError by mutableStateOf<String?>(null)
 
-        // 1. Ordner auf Fire OS vor dem allerersten Start anlegen (verhindert Blackscreen-Crash!)
-        val dbFile = applicationContext.getDatabasePath("aether_stream.db")
-        dbFile.parentFile?.mkdirs()
+        try {
+            val prefs = getSharedPreferences("aether_device_prefs", Context.MODE_PRIVATE)
 
-        // 2. Nativer Android-Treiber (100% stabil auf Fire TV Cube)
-        val database = Room.databaseBuilder<AetherDatabase>(
-            context = applicationContext,
-            name = "aether_stream.db"
-        )
-            .setQueryCoroutineContext(Dispatchers.IO)
-            .build()
+            // 1. Verzeichnis für Room SQLite auf Fire OS sicherstellen
+            val dbFile = applicationContext.getDatabasePath("aether_stream.db")
+            dbFile.parentFile?.mkdirs()
 
-        val dao = database.aetherDao()
+            // 2. Room mit BundledSQLiteDriver und Migrations-Toleranz instanziieren
+            val database = Room.databaseBuilder(
+                context = applicationContext,
+                klass = AetherDatabase::class.java,
+                name = dbFile.absolutePath
+            )
+                .setDriver(BundledSQLiteDriver())
+                .fallbackToDestructiveMigration(true)
+                .setQueryCoroutineContext(Dispatchers.IO)
+                .build()
 
-        val httpClient = HttpClient(OkHttp) {
-            install(ContentNegotiation) {
-                json(
-                    Json {
-                        ignoreUnknownKeys = true
-                        isLenient = true
-                        coerceInputValues = true
-                    }
-                )
-            }
-        }
+            val dao = database.aetherDao()
 
-        val syncRepository = XtreamSyncRepository(dao, httpClient)
-        playerEngine = AndroidMedia3PlayerEngine(applicationContext)
-
-        setContent {
-            val navViewModel = viewModel { AetherNavigationViewModel() }
-            val gatekeeperViewModel = viewModel { GatekeeperViewModel() }
-            val dashboardViewModel = viewModel { DashboardAndFilterViewModel(dao, syncRepository) }
-            val navState by navViewModel.uiState.collectAsState()
-
-            LaunchedEffect(Unit) {
-                val alreadyUnlocked = prefs.getBoolean("is_device_unlocked", false)
-                val existingPlaylist = dao.getActivePlaylistOnce()
-                if (alreadyUnlocked) {
-                    navViewModel.initializeStartupState(
-                        isUnlocked = true,
-                        hasPlaylist = existingPlaylist != null,
-                        newGroupsCount = 0
+            val httpClient = HttpClient(OkHttp) {
+                install(ContentNegotiation) {
+                    json(
+                        Json {
+                            ignoreUnknownKeys = true
+                            isLenient = true
+                            coerceInputValues = true
+                        }
                     )
                 }
             }
 
-            LaunchedEffect(navState.currentScreen) {
-                if (navState.currentScreen !is AetherScreen.GatekeeperLock) {
-                    prefs.edit().putBoolean("is_device_unlocked", true).apply()
+            val syncRepository = XtreamSyncRepository(dao, httpClient)
+            val engine = AndroidMedia3PlayerEngine(applicationContext)
+            playerEngine = engine
+
+            setContent {
+                if (fatalError != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xFF07090E))
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        SelectionContainer {
+                            Text(
+                                text = "AETHER START-DIAGNOSE:\n\n$fatalError",
+                                color = Color(0xFF00F0FF),
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                modifier = Modifier.verticalScroll(rememberScrollState())
+                            )
+                        }
+                    }
+                } else {
+                    val navViewModel = viewModel { AetherNavigationViewModel() }
+                    val gatekeeperViewModel = viewModel { GatekeeperViewModel() }
+                    val dashboardViewModel = viewModel { DashboardAndFilterViewModel(dao, syncRepository) }
+                    val navState by navViewModel.uiState.collectAsState()
+
+                    LaunchedEffect(Unit) {
+                        val alreadyUnlocked = prefs.getBoolean("is_device_unlocked", false)
+                        val existingPlaylist = dao.getActivePlaylistOnce()
+                        if (alreadyUnlocked) {
+                            navViewModel.initializeStartupState(
+                                isUnlocked = true,
+                                hasPlaylist = existingPlaylist != null,
+                                newGroupsCount = 0
+                            )
+                        }
+                    }
+
+                    LaunchedEffect(navState.currentScreen) {
+                        if (navState.currentScreen !is AetherScreen.GatekeeperLock) {
+                            prefs.edit().putBoolean("is_device_unlocked", true).apply()
+                        }
+                    }
+
+                    BackHandler(
+                        enabled = navState.screenHistory.isNotEmpty() ||
+                            navState.isAdminModalVisible ||
+                            navState.isFilterDropDownVisible
+                    ) {
+                        navViewModel.navigateBack()
+                    }
+
+                    AetherApp(
+                        dao = dao,
+                        playerEngine = engine,
+                        navigationViewModel = navViewModel,
+                        gatekeeperViewModel = gatekeeperViewModel,
+                        dashboardViewModel = dashboardViewModel
+                    )
                 }
             }
-
-            BackHandler(
-                enabled = navState.screenHistory.isNotEmpty() ||
-                    navState.isAdminModalVisible ||
-                    navState.isFilterDropDownVisible
-            ) {
-                navViewModel.navigateBack()
+        } catch (t: Throwable) {
+            fatalError = t.stackTraceToString()
+            setContent {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF07090E))
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = "AETHER SYSTEMFEHLER BEIM START:\n\n$fatalError",
+                            color = Color(0xFFEF4444),
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            modifier = Modifier.verticalScroll(rememberScrollState())
+                        )
+                    }
+                }
             }
-
-            AetherApp(
-                dao = dao,
-                playerEngine = playerEngine,
-                navigationViewModel = navViewModel,
-                gatekeeperViewModel = gatekeeperViewModel,
-                dashboardViewModel = dashboardViewModel
-            )
         }
     }
 
     override fun onStop() {
         super.onStop()
-        playerEngine.pause()
+        playerEngine?.pause()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        playerEngine.release()
+        playerEngine?.release()
     }
 }
