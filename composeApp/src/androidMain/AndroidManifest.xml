@@ -12,7 +12,7 @@
         android:label="AETHER Stream"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
 
         <activity
             android:name=".MainActivity"
