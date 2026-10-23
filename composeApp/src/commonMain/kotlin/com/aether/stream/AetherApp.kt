@@ -1,6 +1,7 @@
 package com.aether.stream
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -17,6 +18,7 @@ import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.FavoriteFolderMappingEntity
 import com.aether.stream.data.local.PlaylistEntity
+import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
 import com.aether.stream.feature.dashboard.AetherIboDashboardScreen
 import com.aether.stream.feature.dashboard.DashboardAndFilterViewModel
@@ -28,6 +30,7 @@ import com.aether.stream.feature.player.LiveTvDualCockpitScreen
 import com.aether.stream.feature.vod.CombinedFavoriteFolderModal
 import com.aether.stream.feature.vod.VodAndSeriesCinemaScreen
 import com.aether.stream.feature.vod.XtreamPlaylistSetupScreen
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.datetime.Clock
@@ -48,6 +51,7 @@ fun AetherApp(
 
     var selectedCategoryKey by remember { mutableStateOf("SYS_QUICK_FAV") }
     var currentPlayingStream by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var currentPlayingEpisode by remember { mutableStateOf<SeriesEpisodeEntity?>(null) }
     var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
 
     val playlistId = activePlaylist?.id ?: 0L
@@ -81,6 +85,28 @@ fun AetherApp(
             else -> dao.observeVisibleStreamsInCategory(selectedCategoryKey)
         }
     }.collectAsState(initial = emptyList())
+
+    // ============================================================
+    // PHASE 2: PERIODISCHER AUTO-RESUME SPEICHERTICKER (ALLE 5 SEK.)
+    // ============================================================
+    val isEnginePlaying by playerEngine.isPlaying.collectAsState()
+    LaunchedEffect(isEnginePlaying, currentPlayingStream, currentPlayingEpisode) {
+        if (isEnginePlaying) {
+            while (true) {
+                delay(5000L)
+                val pos = playerEngine.currentPositionMs.value
+                val dur = playerEngine.durationMs.value
+                if (pos > 10_000L && dur > 0L) {
+                    val now = Clock.System.now().toEpochMilliseconds()
+                    currentPlayingEpisode?.let { ep ->
+                        dao.updateEpisodeWatchProgress(ep.uniqueEpisodeKey, pos, dur, now)
+                    } ?: currentPlayingStream?.let { stream ->
+                        dao.updateWatchProgress(stream.uniqueStreamKey, pos, dur, now)
+                    }
+                }
+            }
+        }
+    }
 
     AetherTheme {
         when (navState.currentScreen) {
@@ -156,6 +182,7 @@ fun AetherApp(
                     currentChannelEpg = emptyList(),
                     onSelectCategory = { selectedCategoryKey = it },
                     onSelectStream = { stream ->
+                        currentPlayingEpisode = null
                         currentPlayingStream = stream
                         scope.launch {
                             dao.updateWatchProgress(
@@ -201,15 +228,27 @@ fun AetherApp(
             is AetherScreen.VodMovies, is AetherScreen.Series -> {
                 VodAndSeriesCinemaScreen(
                     sectionType = activeSection,
+                    dao = dao,
+                    onRequestSeriesEpisodes = { seriesItem ->
+                        dashboardViewModel.fetchSeriesEpisodesOnDemand(seriesItem)
+                    },
                     categories = visibleCategories,
                     favoriteFolders = favoriteFolders,
                     selectedCategoryKey = selectedCategoryKey,
                     itemsInGrid = streamsInSelectedCategory,
                     onSelectCategory = { selectedCategoryKey = it },
                     onPlayMediaItem = { mediaItem, resume ->
+                        currentPlayingEpisode = null
                         currentPlayingStream = mediaItem
                         val startPos = if (resume) mediaItem.resumePositionMs else 0L
                         playerEngine.playStream(mediaItem.streamUrl, startPos)
+                        navigationViewModel.navigateTo(AetherScreen.LiveTv)
+                    },
+                    onPlayEpisode = { episode, seriesItem, resume ->
+                        currentPlayingEpisode = episode
+                        currentPlayingStream = seriesItem
+                        val startPos = if (resume) episode.resumePositionMs else 0L
+                        playerEngine.playStream(episode.streamUrl, startPos)
                         navigationViewModel.navigateTo(AetherScreen.LiveTv)
                     },
                     onToggleQuickFavorite = { stream ->
