@@ -54,7 +54,8 @@ data class XtreamVodStreamDto(
     @SerialName("stream_icon") val streamIcon: String? = null,
     @SerialName("rating") val rating: JsonElement? = null,
     @SerialName("category_id") val categoryId: JsonElement? = null,
-    @SerialName("container_extension") val containerExtension: String? = "mp4"
+    @SerialName("container_extension") val containerExtension: JsonElement? = null,
+    @SerialName("direct_source") val directSource: JsonElement? = null
 )
 
 @Serializable
@@ -68,21 +69,20 @@ data class XtreamSeriesDto(
     @SerialName("category_id") val categoryId: JsonElement? = null
 )
 
+/**
+ * 100% crash-resistent: 'info' und 'container_extension' sind als JsonElement deklariert,
+ * damit ein leeres PHP-Array ("info": []) niemals den Staffel-Abruf abbricht!
+ */
 @Serializable
 data class XtreamEpisodeDto(
     @SerialName("id") val id: JsonElement? = null,
+    @SerialName("stream_id") val streamId: JsonElement? = null,
     @SerialName("episode_num") val episodeNum: JsonElement? = null,
+    @SerialName("season") val season: JsonElement? = null,
     @SerialName("title") val title: String? = null,
-    @SerialName("container_extension") val containerExtension: String? = "mp4",
-    @SerialName("info") val info: XtreamEpisodeInfoDto? = null
-)
-
-@Serializable
-data class XtreamEpisodeInfoDto(
-    @SerialName("plot") val plot: String? = null,
-    @SerialName("duration_secs") val durationSecs: JsonElement? = null,
-    @SerialName("duration") val duration: String? = null,
-    @SerialName("rating") val rating: JsonElement? = null
+    @SerialName("container_extension") val containerExtension: JsonElement? = null,
+    @SerialName("direct_source") val directSource: JsonElement? = null,
+    @SerialName("info") val info: JsonElement? = null
 )
 
 private fun JsonElement?.asCleanString(default: String = ""): String =
@@ -249,7 +249,14 @@ class XtreamSyncRepository(
                             sortIndex = 9999
                         )
                     }
-                    val ext = dto.containerExtension?.takeIf { it.isNotBlank() } ?: "mp4"
+                    val ext = dto.containerExtension.asCleanString("mp4").trimStart('.').ifBlank { "mp4" }
+                    val directUrl = dto.directSource.asCleanString("")
+                    val finalVodUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
+                        directUrl
+                    } else {
+                        "$baseUrl/movie/${playlist.username}/${playlist.password}/$sId.$ext"
+                    }
+
                     allStreamEntities.add(
                         StreamItemEntity(
                             uniqueStreamKey = "${playlist.id}_VOD_$sId",
@@ -259,7 +266,7 @@ class XtreamSyncRepository(
                             sectionType = AetherSectionType.VOD,
                             name = dto.name?.takeIf { it.isNotBlank() } ?: "Film #$sId",
                             logoUrl = dto.streamIcon,
-                            streamUrl = "$baseUrl/movie/${playlist.username}/${playlist.password}/$sId.$ext",
+                            streamUrl = finalVodUrl,
                             containerExtension = ext,
                             rating = dto.rating.asCleanString(""),
                             isVisible = true,
@@ -319,8 +326,9 @@ class XtreamSyncRepository(
     }
 
     /**
-     * Phase 2: Lädt alle Staffeln und Episoden einer Serie on demand herunter
-     * und speichert sie in der Room-Tabelle 'series_episodes'.
+     * Phase 2 (100% Universal-Parser):
+     * Unterstützt sowohl JsonObject ("1": [...], "2": [...]) als auch JsonArray (1-Staffel-Serien / Listen)
+     * und ignoriert kaputte/leere TMDB-Info-Arrays ("info": []), ohne abzustürzen.
      */
     suspend fun fetchAndStoreSeriesEpisodes(
         playlist: PlaylistEntity,
@@ -341,42 +349,81 @@ class XtreamSyncRepository(
         }.getOrNull() ?: return@withContext false
 
         val episodesElement = (rootElement as? JsonObject)?.get("episodes") ?: return@withContext false
-        val episodesObj = episodesElement as? JsonObject ?: return@withContext false
-
         val episodeEntities = mutableListOf<SeriesEpisodeEntity>()
 
-        episodesObj.forEach { (seasonKey, seasonEpisodesArray) ->
-            val seasonNum = seasonKey.toIntOrNull() ?: 1
-            if (seasonEpisodesArray is JsonArray) {
-                val dtos = runCatching {
-                    jsonParser.decodeFromJsonElement<List<XtreamEpisodeDto>>(seasonEpisodesArray)
-                }.getOrDefault(emptyList())
+        fun parseEpisodeDtoAndAdd(epDto: XtreamEpisodeDto, fallbackSeason: Int, fallbackEpIndex: Int) {
+            val rawId = epDto.id.asCleanString("").ifEmpty { epDto.streamId.asCleanString("") }
+            if (rawId.isEmpty()) return
 
-                dtos.forEach { epDto ->
-                    val epId = epDto.id.asCleanString("")
-                    val epNum = epDto.episodeNum.asCleanInt(1)
-                    if (epId.isNotEmpty()) {
-                        val durationSeconds = epDto.info?.durationSecs.asCleanInt(0).toLong()
-                        val ext = epDto.containerExtension?.takeIf { it.isNotBlank() } ?: "mp4"
-                        val videoUrl = "$baseUrl/series/${playlist.username}/${playlist.password}/$epId.$ext"
+            val seasonNum = epDto.season.asCleanInt(fallbackSeason).coerceAtLeast(1)
+            val epNum = epDto.episodeNum.asCleanInt(fallbackEpIndex).coerceAtLeast(1)
+            val ext = epDto.containerExtension.asCleanString("mp4").trimStart('.').ifBlank { "mp4" }
 
-                        episodeEntities.add(
-                            SeriesEpisodeEntity(
-                                uniqueEpisodeKey = "${seriesItem.uniqueStreamKey}_s${seasonNum}_e${epNum}",
-                                seriesStreamKey = seriesItem.uniqueStreamKey,
-                                seasonNumber = seasonNum,
-                                episodeNumber = epNum,
-                                title = epDto.title?.takeIf { it.isNotBlank() } ?: "Episode $epNum",
-                                containerExtension = ext,
-                                plotDescription = epDto.info?.plot,
-                                durationMs = durationSeconds * 1000L,
-                                streamUrl = videoUrl,
-                                rating = epDto.info?.rating.asCleanString("")
-                            )
-                        )
+            val infoObj = epDto.info as? JsonObject
+            val plot = infoObj?.get("plot").asCleanString("").takeIf { it.isNotEmpty() }
+            val durationSeconds = infoObj?.get("duration_secs").asCleanInt(0).toLong()
+            val rating = infoObj?.get("rating").asCleanString("")
+
+            val directUrl = epDto.directSource.asCleanString("")
+            val videoUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
+                directUrl
+            } else {
+                "$baseUrl/series/${playlist.username}/${playlist.password}/$rawId.$ext"
+            }
+
+            episodeEntities.add(
+                SeriesEpisodeEntity(
+                    uniqueEpisodeKey = "${seriesItem.uniqueStreamKey}_s${seasonNum}_e${epNum}_id$rawId",
+                    seriesStreamKey = seriesItem.uniqueStreamKey,
+                    seasonNumber = seasonNum,
+                    episodeNumber = epNum,
+                    title = epDto.title?.takeIf { it.isNotBlank() } ?: "Episode $epNum",
+                    containerExtension = ext,
+                    plotDescription = plot,
+                    durationMs = durationSeconds * 1000L,
+                    streamUrl = videoUrl,
+                    rating = rating
+                )
+            )
+        }
+
+        when (episodesElement) {
+            is JsonObject -> {
+                episodesElement.forEach { (seasonKey, seasonValue) ->
+                    val seasonNum = seasonKey.trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
+                    if (seasonValue is JsonArray) {
+                        seasonValue.forEachIndexed { index, itemElement ->
+                            runCatching {
+                                val dto = jsonParser.decodeFromJsonElement<XtreamEpisodeDto>(itemElement)
+                                parseEpisodeDtoAndAdd(dto, seasonNum, index + 1)
+                            }
+                        }
                     }
                 }
             }
+            is JsonArray -> {
+                episodesElement.forEachIndexed { outerIndex, element ->
+                    when (element) {
+                        is JsonArray -> {
+                            val seasonNum = outerIndex + 1
+                            element.forEachIndexed { innerIndex, itemElement ->
+                                runCatching {
+                                    val dto = jsonParser.decodeFromJsonElement<XtreamEpisodeDto>(itemElement)
+                                    parseEpisodeDtoAndAdd(dto, seasonNum, innerIndex + 1)
+                                }
+                            }
+                        }
+                        is JsonObject -> {
+                            runCatching {
+                                val dto = jsonParser.decodeFromJsonElement<XtreamEpisodeDto>(element)
+                                parseEpisodeDtoAndAdd(dto, 1, outerIndex + 1)
+                            }
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+            else -> Unit
         }
 
         if (episodeEntities.isNotEmpty()) {
