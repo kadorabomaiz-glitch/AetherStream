@@ -33,7 +33,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,13 +49,13 @@ import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.launch
 
 @Composable
 fun VodAndSeriesCinemaScreen(
     sectionType: AetherSectionType,
     dao: AetherDao,
     onRequestSeriesEpisodes: (suspend (StreamItemEntity) -> Boolean)? = null,
+    onRequestCategoryStreams: (suspend (CategoryEntity) -> Boolean)? = null,
     categories: List<CategoryEntity>,
     favoriteFolders: List<FavoriteFolderEntity>,
     selectedCategoryKey: String,
@@ -69,6 +68,18 @@ fun VodAndSeriesCinemaScreen(
     onBackToDashboard: () -> Unit
 ) {
     var selectedDetailItem by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var isLoadingCategoryStreams by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedCategoryKey, itemsInGrid.isEmpty()) {
+        if (itemsInGrid.isEmpty() && onRequestCategoryStreams != null) {
+            val activeCat = categories.find { it.uniqueCategoryKey == selectedCategoryKey }
+            if (activeCat != null) {
+                isLoadingCategoryStreams = true
+                onRequestCategoryStreams(activeCat)
+                isLoadingCategoryStreams = false
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -99,7 +110,7 @@ fun VodAndSeriesCinemaScreen(
             }
 
             Text(
-                text = "Tipp: 1x ★ = Schnell-Favorit  •  OK gedrückt halten = Eigener Ordner 📁",
+                text = "Tipp: 1x OK = Öffnen  •  OK gedrückt halten = Eigener Ordner 📁",
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -158,25 +169,55 @@ fun VodAndSeriesCinemaScreen(
                 }
             }
 
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 165.dp),
-                contentPadding = PaddingValues(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+            Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
             ) {
-                items(
-                    items = itemsInGrid,
-                    key = { it.uniqueStreamKey }
-                ) { mediaItem ->
-                    PosterGridCard(
-                        item = mediaItem,
-                        onClick = { selectedDetailItem = mediaItem },
-                        onLongClick = { onOpenFavoriteFolderModal(mediaItem) },
-                        onQuickFavClick = { onToggleQuickFavorite(mediaItem) }
-                    )
+                if (isLoadingCategoryStreams && itemsInGrid.isEmpty()) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        CircularProgressIndicator(color = AetherColors.CyberCyan)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = if (sectionType == AetherSectionType.VOD) {
+                                "Lade Filme dieser Kategorie..."
+                            } else {
+                                "Lade Serien dieser Kategorie..."
+                            },
+                            style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
+                        )
+                    }
+                } else if (itemsInGrid.isEmpty()) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                        Text(
+                            text = "Keine Einträge in dieser Ansicht vorhanden. Bitte wähle links eine andere Kategorie.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 165.dp),
+                        contentPadding = PaddingValues(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(
+                            items = itemsInGrid,
+                            key = { it.uniqueStreamKey }
+                        ) { mediaItem ->
+                            PosterGridCard(
+                                item = mediaItem,
+                                onClick = { selectedDetailItem = mediaItem },
+                                onLongClick = { onOpenFavoriteFolderModal(mediaItem) },
+                                onQuickFavClick = { onToggleQuickFavorite(mediaItem) }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -184,9 +225,6 @@ fun VodAndSeriesCinemaScreen(
 
     selectedDetailItem?.let { item ->
         if (item.sectionType == AetherSectionType.SERIES) {
-            // ==========================================
-            // PHASE 2: SERIEN-DETAIL-COCKPIT
-            // ==========================================
             SeriesDetailCockpitModal(
                 seriesItem = item,
                 dao = dao,
@@ -198,9 +236,6 @@ fun VodAndSeriesCinemaScreen(
                 onDismiss = { selectedDetailItem = null }
             )
         } else {
-            // ==========================================
-            // VOD FILM-DETAIL-MODAL
-            // ==========================================
             VodSeriesDetailModal(
                 item = item,
                 onPlayFromStart = {
@@ -235,6 +270,8 @@ private fun CinemaCategoryRow(
     ) {
         Text(
             text = title,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.titleMedium.copy(
                 color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
             ),
@@ -281,17 +318,17 @@ private fun PosterGridCard(
                     )
                 }
 
-                AetherFocusableGlassCard(
-                    onClick = onQuickFavClick,
-                    cornerRadius = 6.dp,
-                    enableScaleOnFocus = false
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(AetherColors.ObsidianBlack.copy(alpha = 0.85f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = if (item.isQuickFavorite) "★" else "☆",
                         style = MaterialTheme.typography.titleMedium.copy(
                             color = if (item.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary
-                        ),
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
                     )
                 }
             }
@@ -382,7 +419,6 @@ private fun SeriesDetailCockpitModal(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                // Linke Spalte: Serien-Metadaten
                 Column(
                     modifier = Modifier
                         .width(300.dp)
@@ -413,7 +449,7 @@ private fun SeriesDetailCockpitModal(
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         AetherFocusableGlassCard(onClick = onOpenFolderManager, cornerRadius = 10.dp) {
                             Text(
-                                text = "📁 IN FAVORITEN-ORDNER",
+                                text = "📁 FAVORITEN & ORDNER",
                                 style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                             )
@@ -428,7 +464,6 @@ private fun SeriesDetailCockpitModal(
                     }
                 }
 
-                // Rechte Spalte: Staffeln & Folgen
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -453,7 +488,6 @@ private fun SeriesDetailCockpitModal(
                             )
                         }
                     } else {
-                        // Horizontale Staffel-Pills (D-Pad Links/Rechts)
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.fillMaxWidth()
@@ -478,7 +512,6 @@ private fun SeriesDetailCockpitModal(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Vertikale Episodenliste
                         LazyColumn(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier
@@ -587,16 +620,20 @@ private fun VodSeriesDetailModal(
         ) {
             Text(
                 text = item.name,
-                style = MaterialTheme.typography.headlineLarge.copy(color = AetherColors.CyberCyan)
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan)
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Bewertung: ${item.rating ?: "Keine Angabe"} • Container: ${item.containerExtension?.uppercase() ?: "MP4"}",
+                text = "Bewertung: ${item.rating ?: "HD"} • Container: ${item.containerExtension?.uppercase() ?: "MP4"}",
                 style = MaterialTheme.typography.labelSmall
             )
             Spacer(modifier = Modifier.height(14.dp))
             Text(
                 text = item.plotDescription ?: "Bereit zur Wiedergabe in voller Hardware-Beschleunigung.",
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium
             )
             Spacer(modifier = Modifier.height(24.dp))
@@ -617,7 +654,8 @@ private fun VodSeriesDetailModal(
                                 .padding(vertical = 14.dp)
                         ) {
                             Text(
-                                text = "▶️ WEITER SCHAUEN (AB MIN. $resumeMinutes)",
+                                text = "▶️ WEITER (AB MIN. $resumeMinutes)",
+                                maxLines = 1,
                                 style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.NeonEmerald)
                             )
                         }
@@ -635,14 +673,15 @@ private fun VodSeriesDetailModal(
                             .padding(vertical = 14.dp)
                     ) {
                         Text(
-                            text = "🎬 VON ANFANG AN STARTEN",
+                            text = "🎬 FILM STARTEN",
+                            maxLines = 1,
                             style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -650,7 +689,7 @@ private fun VodSeriesDetailModal(
             ) {
                 AetherFocusableGlassCard(onClick = onOpenFolderManager, cornerRadius = 10.dp) {
                     Text(
-                        text = "📁 IN FAVORITEN-ORDNER VERSCHIEBEN",
+                        text = "⭐ FAVORITEN & ORDNER",
                         style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                     )
