@@ -13,9 +13,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.aether.stream.core.navigation.StreamBufferPreset
@@ -36,6 +38,10 @@ class AndroidMedia3PlayerEngine(
     private val context: Context
 ) : AetherVideoPlayerEngine {
 
+    companion object {
+        private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
+    }
+
     private val scope = CoroutineScope(Dispatchers.Main)
     private var progressTickerJob: Job? = null
 
@@ -48,9 +54,6 @@ class AndroidMedia3PlayerEngine(
     private val _subtitleTracks = MutableStateFlow<List<TrackOption>>(emptyList())
     override val subtitleTracks: StateFlow<List<TrackOption>> = _subtitleTracks.asStateFlow()
 
-    // ==========================================
-    // PHASE 2: REAKTIVE VOD & SERIEN STATES
-    // ==========================================
     private val _currentPositionMs = MutableStateFlow(0L)
     override val currentPositionMs: StateFlow<Long> = _currentPositionMs.asStateFlow()
 
@@ -67,7 +70,7 @@ class AndroidMedia3PlayerEngine(
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    // 1. playerListener MUSS strikt vor buildExoPlayer deklariert sein (behebt die NullPointerException!)
+    // 1. playerListener strikt vor buildExoPlayer deklarieren
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
@@ -115,10 +118,11 @@ class AndroidMedia3PlayerEngine(
             val url = currentStreamUrl ?: return
             if (reconnectCount < 5) {
                 reconnectCount++
+                val lastKnownPos = exoPlayer.currentPosition.coerceAtLeast(0L)
                 _techMetadata.update { it.copy(reconnectAttempt = reconnectCount, isBuffering = true) }
                 scope.launch {
                     delay(650L * reconnectCount)
-                    exoPlayer.setMediaItem(MediaItem.fromUri(url))
+                    exoPlayer.setMediaItem(MediaItem.fromUri(url), lastKnownPos)
                     exoPlayer.prepare()
                     exoPlayer.play()
                 }
@@ -130,6 +134,15 @@ class AndroidMedia3PlayerEngine(
         private set
 
     private fun buildExoPlayer(preset: StreamBufferPreset): ExoPlayer {
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(IPTV_USER_AGENT)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+            .setDataSourceFactory(httpDataSourceFactory)
+
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 preset.minBufferMs,
@@ -145,6 +158,7 @@ class AndroidMedia3PlayerEngine(
             .setEnableDecoderFallback(true)
 
         return ExoPlayer.Builder(context, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build()
             .apply {
@@ -154,13 +168,16 @@ class AndroidMedia3PlayerEngine(
     }
 
     override fun playStream(url: String, startPositionMs: Long) {
-        if (currentStreamUrl == url && exoPlayer.isPlaying && startPositionMs == 0L) return
-        currentStreamUrl = url
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty()) return
+        currentStreamUrl = cleanUrl
         reconnectCount = 0
         _isPlaybackEnded.value = false
         _currentPositionMs.value = startPositionMs
 
-        exoPlayer.setMediaItem(MediaItem.fromUri(url), startPositionMs)
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        exoPlayer.setMediaItem(MediaItem.fromUri(cleanUrl), startPositionMs)
         exoPlayer.prepare()
         exoPlayer.play()
     }
@@ -210,7 +227,7 @@ class AndroidMedia3PlayerEngine(
         if (currentPreset == preset) return
         currentPreset = preset
         val activeUrl = currentStreamUrl
-        val currentPos = exoPlayer.currentPosition
+        val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
 
         stopProgressTicker()
         exoPlayer.release()
@@ -264,7 +281,7 @@ class AndroidMedia3PlayerEngine(
                             format.height >= 1080 -> "1080p FHD"
                             format.height >= 720 -> "720p HD"
                             format.height > 0 -> "${format.height}p"
-                            else -> "LIVE HD"
+                            else -> "HD STREAM"
                         }
                         val fps = if (format.frameRate > 0f) "${format.frameRate.roundToInt()} FPS" else "50 FPS"
                         val vCodec = format.sampleMimeType?.substringAfter("/")?.uppercase() ?: "H.264"
