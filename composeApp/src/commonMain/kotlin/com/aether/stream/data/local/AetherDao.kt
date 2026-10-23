@@ -1,229 +1,239 @@
 package com.aether.stream.data.local
 
 import androidx.room.Dao
+import androidx.room.Database
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Upsert
+import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
-// ==========================================
-// 1. LIVE-TV & KATEGORIE DAOS
-// ==========================================
-
 @Dao
-interface ChannelDao {
-    @Query("""
-        SELECT * FROM channels 
-        WHERE categoryId = :categoryId 
-        ORDER BY orderIndex ASC, name ASC
-    """)
-    fun getChannelsByCategoryFlow(categoryId: String): Flow<List<ChannelEntity>>
+interface AetherDao {
 
-    @Query("SELECT * FROM channels WHERE isFavorite = 1 ORDER BY name ASC")
-    fun getFavoriteChannelsFlow(): Flow<List<ChannelEntity>>
+    @Query("SELECT * FROM playlists WHERE isActive = 1 LIMIT 1")
+    fun observeActivePlaylist(): Flow<PlaylistEntity?>
 
-    @Query("SELECT * FROM channels WHERE customFolderId = :folderId ORDER BY name ASC")
-    fun getChannelsByCustomFolderFlow(folderId: String): Flow<List<ChannelEntity>>
-
-    @Query("SELECT * FROM channels WHERE streamId = :streamId LIMIT 1")
-    suspend fun getChannelById(streamId: Int): ChannelEntity?
-
-    @Query("SELECT * FROM channels WHERE name LIKE '%' || :query || '%' LIMIT :limit")
-    suspend fun searchChannels(query: String, limit: Int = 100): List<ChannelEntity>
+    @Query("SELECT * FROM playlists WHERE isActive = 1 LIMIT 1")
+    suspend fun getActivePlaylistOnce(): PlaylistEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertChannels(channels: List<ChannelEntity>)
+    suspend fun insertOrUpdatePlaylist(playlist: PlaylistEntity): Long
 
-    @Query("UPDATE channels SET isFavorite = :isFavorite WHERE streamId = :streamId")
-    suspend fun updateFavoriteStatus(streamId: Int, isFavorite: Boolean)
+    @Query("UPDATE playlists SET isInitialSyncCompleted = 1, lastSyncEpochMillis = :timestamp WHERE id = :playlistId")
+    suspend fun markPlaylistSynced(playlistId: Long, timestamp: Long)
 
-    @Query("UPDATE channels SET customFolderId = :folderId WHERE streamId = :streamId")
-    suspend fun updateCustomFolder(streamId: Int, folderId: String?)
+    @Transaction
+    suspend fun setEntireSectionVisibility(
+        playlistId: Long,
+        sectionType: AetherSectionType,
+        visible: Boolean
+    ) {
+        updateAllCategoriesVisibilityInSection(playlistId, sectionType, visible)
+        updateAllStreamsVisibilityInSection(playlistId, sectionType, visible)
+    }
 
-    @Query("DELETE FROM channels")
-    suspend fun deleteAllChannels()
-}
+    @Query("UPDATE categories SET isVisible = :visible, isNewlyDiscovered = 0 WHERE playlistId = :playlistId AND sectionType = :sectionType")
+    suspend fun updateAllCategoriesVisibilityInSection(
+        playlistId: Long,
+        sectionType: AetherSectionType,
+        visible: Boolean
+    )
 
-@Dao
-interface CategoryDao {
-    @Query("SELECT * FROM categories WHERE categoryType = :type AND isVisible = 1 AND isLocked = 0 ORDER BY sortOrder ASC")
-    fun getVisibleCategoriesFlow(type: String): Flow<List<CategoryEntity>>
+    @Query("UPDATE stream_items SET isVisible = :visible WHERE playlistId = :playlistId AND sectionType = :sectionType")
+    suspend fun updateAllStreamsVisibilityInSection(
+        playlistId: Long,
+        sectionType: AetherSectionType,
+        visible: Boolean
+    )
 
-    @Query("SELECT * FROM categories WHERE categoryType = :type ORDER BY sortOrder ASC")
-    fun getAllCategoriesFlow(type: String): Flow<List<CategoryEntity>>
+    @Transaction
+    suspend fun setCategoryAndChildrenVisibility(uniqueCategoryKey: String, visible: Boolean) {
+        updateSingleCategoryVisibility(uniqueCategoryKey, visible)
+        updateStreamsVisibilityByCategory(uniqueCategoryKey, visible)
+    }
 
-    @Query("SELECT * FROM categories WHERE isNewlyDiscovered = 1")
-    fun getNewlyDiscoveredCategoriesFlow(): Flow<List<CategoryEntity>>
+    @Query("UPDATE categories SET isVisible = :visible, isNewlyDiscovered = 0 WHERE uniqueCategoryKey = :uniqueCategoryKey")
+    suspend fun updateSingleCategoryVisibility(uniqueCategoryKey: String, visible: Boolean)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertCategories(categories: List<CategoryEntity>)
+    @Query("UPDATE stream_items SET isVisible = :visible WHERE uniqueCategoryKey = :uniqueCategoryKey")
+    suspend fun updateStreamsVisibilityByCategory(uniqueCategoryKey: String, visible: Boolean)
 
-    @Query("UPDATE categories SET isVisible = :isVisible WHERE categoryId = :categoryId")
-    suspend fun updateVisibility(categoryId: String, isVisible: Boolean)
+    @Query("UPDATE stream_items SET isVisible = :visible WHERE uniqueStreamKey = :uniqueStreamKey")
+    suspend fun setSingleStreamVisibility(uniqueStreamKey: String, visible: Boolean)
 
-    @Query("UPDATE categories SET isLocked = :isLocked WHERE categoryId = :categoryId")
-    suspend fun updateLockStatus(categoryId: String, isLocked: Boolean)
+    @Query("UPDATE categories SET isLocked = :locked WHERE uniqueCategoryKey = :uniqueCategoryKey")
+    suspend fun setCategoryLockState(uniqueCategoryKey: String, locked: Boolean)
 
-    @Query("UPDATE categories SET isNewlyDiscovered = 0 WHERE categoryId = :categoryId")
-    suspend fun clearNewlyDiscovered(categoryId: String)
-
-    @Query("DELETE FROM categories")
-    suspend fun deleteAllCategories()
-}
-
-@Dao
-interface CustomFolderDao {
-    @Query("SELECT * FROM custom_folders ORDER BY sortOrder ASC, folderName ASC")
-    fun getAllFoldersFlow(): Flow<List<CustomFolderEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertFolder(folder: CustomFolderEntity)
-
-    @Query("DELETE FROM custom_folders WHERE folderId = :folderId")
-    suspend fun deleteFolder(folderId: String)
-}
-
-// ==========================================
-// 2. VOD & SERIEN DAOS (PHASE 2)
-// ==========================================
-
-@Dao
-interface VodDao {
-    @Query("SELECT * FROM vod_streams WHERE categoryId = :categoryId ORDER BY name ASC")
-    fun getVodsByCategoryFlow(categoryId: String): Flow<List<VodEntity>>
-
-    @Query("SELECT * FROM vod_streams WHERE categoryId = :categoryId ORDER BY name ASC")
-    suspend fun getVodsByCategory(categoryId: String): List<VodEntity>
-
-    @Query("SELECT * FROM vod_streams WHERE streamId = :streamId LIMIT 1")
-    suspend fun getVodById(streamId: Int): VodEntity?
-
-    @Query("SELECT * FROM vod_streams WHERE isFavorite = 1 ORDER BY name ASC")
-    fun getFavoriteVodsFlow(): Flow<List<VodEntity>>
-
-    @Query("SELECT * FROM vod_streams WHERE customFolderId = :folderId ORDER BY name ASC")
-    fun getVodsByCustomFolderFlow(folderId: String): Flow<List<VodEntity>>
-
-    @Query("SELECT * FROM vod_streams WHERE name LIKE '%' || :query || '%' ORDER BY rating DESC LIMIT :limit")
-    suspend fun searchVods(query: String, limit: Int = 100): List<VodEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertVods(vods: List<VodEntity>)
-
-    @Upsert
-    suspend fun upsertVod(vod: VodEntity)
-
-    @Query("UPDATE vod_streams SET isFavorite = :isFavorite WHERE streamId = :streamId")
-    suspend fun updateFavoriteStatus(streamId: Int, isFavorite: Boolean)
-
-    @Query("UPDATE vod_streams SET customFolderId = :folderId WHERE streamId = :streamId")
-    suspend fun updateCustomFolder(streamId: Int, folderId: String?)
-
-    @Query("DELETE FROM vod_streams")
-    suspend fun deleteAllVods()
-
-    @Query("SELECT COUNT(*) FROM vod_streams")
-    suspend fun getVodCount(): Int
-}
-
-@Dao
-interface SeriesDao {
-    @Query("SELECT * FROM series WHERE categoryId = :categoryId ORDER BY title ASC")
-    fun getSeriesByCategoryFlow(categoryId: String): Flow<List<SeriesEntity>>
-
-    @Query("SELECT * FROM series WHERE categoryId = :categoryId ORDER BY title ASC")
-    suspend fun getSeriesByCategory(categoryId: String): List<SeriesEntity>
-
-    @Query("SELECT * FROM series WHERE seriesId = :seriesId LIMIT 1")
-    suspend fun getSeriesById(seriesId: Int): SeriesEntity?
-
-    @Query("SELECT * FROM series WHERE isFavorite = 1 ORDER BY title ASC")
-    fun getFavoriteSeriesFlow(): Flow<List<SeriesEntity>>
-
-    @Query("SELECT * FROM series WHERE customFolderId = :folderId ORDER BY title ASC")
-    fun getSeriesByCustomFolderFlow(folderId: String): Flow<List<SeriesEntity>>
-
-    @Query("SELECT * FROM series WHERE title LIKE '%' || :query || '%' ORDER BY rating DESC LIMIT :limit")
-    suspend fun searchSeries(query: String, limit: Int = 100): List<SeriesEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSeries(seriesList: List<SeriesEntity>)
-
-    @Upsert
-    suspend fun upsertSeries(series: SeriesEntity)
-
-    @Query("UPDATE series SET isFavorite = :isFavorite WHERE seriesId = :seriesId")
-    suspend fun updateFavoriteStatus(seriesId: Int, isFavorite: Boolean)
-
-    @Query("UPDATE series SET customFolderId = :folderId WHERE seriesId = :seriesId")
-    suspend fun updateCustomFolder(seriesId: Int, folderId: String?)
-
-    @Query("DELETE FROM series")
-    suspend fun deleteAllSeries()
-
-    @Query("SELECT COUNT(*) FROM series")
-    suspend fun getSeriesCount(): Int
-}
-
-@Dao
-interface EpisodeDao {
-    @Query("SELECT DISTINCT seasonNumber FROM series_episodes WHERE seriesId = :seriesId ORDER BY seasonNumber ASC")
-    suspend fun getAvailableSeasons(seriesId: Int): List<Int>
-
-    @Query("SELECT * FROM series_episodes WHERE seriesId = :seriesId AND seasonNumber = :seasonNumber ORDER BY episodeNumber ASC")
-    fun getEpisodesBySeasonFlow(seriesId: Int, seasonNumber: Int): Flow<List<EpisodeEntity>>
-
-    @Query("SELECT * FROM series_episodes WHERE seriesId = :seriesId AND seasonNumber = :seasonNumber ORDER BY episodeNumber ASC")
-    suspend fun getEpisodesBySeason(seriesId: Int, seasonNumber: Int): List<EpisodeEntity>
-
-    @Query("SELECT * FROM series_episodes WHERE id = :episodeId LIMIT 1")
-    suspend fun getEpisodeById(episodeId: String): EpisodeEntity?
+    @Query("UPDATE stream_items SET isLocked = :locked WHERE uniqueStreamKey = :uniqueStreamKey")
+    suspend fun setStreamLockState(uniqueStreamKey: String, locked: Boolean)
 
     @Query("""
-        SELECT * FROM series_episodes 
-        WHERE seriesId = :seriesId 
-          AND (seasonNumber > :currentSeason OR (seasonNumber = :currentSeason AND episodeNumber > :currentEpisode))
-        ORDER BY seasonNumber ASC, episodeNumber ASC 
-        LIMIT 1
+        SELECT * FROM categories 
+        WHERE playlistId = :playlistId 
+          AND sectionType = :sectionType 
+          AND isVisible = 1 
+          AND isLocked = 0 
+        ORDER BY customSortOrder ASC, categoryName ASC
     """)
-    suspend fun findNextEpisode(seriesId: Int, currentSeason: Int, currentEpisode: Int): EpisodeEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertEpisodes(episodes: List<EpisodeEntity>)
-
-    @Query("DELETE FROM series_episodes WHERE seriesId = :seriesId")
-    suspend fun deleteEpisodesForSeries(seriesId: Int)
-}
-
-@Dao
-interface WatchProgressDao {
-    @Query("SELECT * FROM watch_progress WHERE contentId = :contentId LIMIT 1")
-    suspend fun getProgress(contentId: String): WatchProgressEntity?
-
-    @Query("SELECT * FROM watch_progress WHERE contentId = :contentId LIMIT 1")
-    fun getProgressFlow(contentId: String): Flow<WatchProgressEntity?>
+    fun observeVisibleCategories(
+        playlistId: Long,
+        sectionType: AetherSectionType
+    ): Flow<List<CategoryEntity>>
 
     @Query("""
-        SELECT * FROM watch_progress 
-        WHERE isFinished = 0 AND percentage >= :minPercentage 
-        ORDER BY lastWatchedUtc DESC 
-        LIMIT :limit
+        SELECT * FROM stream_items 
+        WHERE uniqueCategoryKey = :uniqueCategoryKey 
+          AND isVisible = 1 
+          AND isLocked = 0 
+        ORDER BY customChannelNumber ASC, name ASC
     """)
-    fun getContinueWatchingFlow(
-        minPercentage: Float = WatchProgressEntity.MIN_RESUME_PERCENTAGE,
-        limit: Int = 30
-    ): Flow<List<WatchProgressEntity>>
+    fun observeVisibleStreamsInCategory(uniqueCategoryKey: String): Flow<List<StreamItemEntity>>
+
+    @Query("""
+        SELECT * FROM categories 
+        WHERE playlistId = :playlistId 
+          AND sectionType = :sectionType 
+        ORDER BY isNewlyDiscovered DESC, customSortOrder ASC, categoryName ASC
+    """)
+    fun observeAllCategoriesForFilterTree(
+        playlistId: Long,
+        sectionType: AetherSectionType
+    ): Flow<List<CategoryEntity>>
+
+    @Query("""
+        SELECT * FROM stream_items 
+        WHERE uniqueCategoryKey = :uniqueCategoryKey 
+        ORDER BY customChannelNumber ASC, name ASC
+    """)
+    fun observeAllStreamsForFilterTree(uniqueCategoryKey: String): Flow<List<StreamItemEntity>>
+
+    @Query("SELECT COUNT(*) FROM categories WHERE playlistId = :playlistId AND isNewlyDiscovered = 1")
+    fun observeNewlyDiscoveredCategoriesCount(playlistId: Long): Flow<Int>
+
+    @Query("SELECT uniqueCategoryKey FROM categories WHERE playlistId = :playlistId")
+    suspend fun getExistingCategoryKeys(playlistId: Long): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertNewCategoriesIgnoringExisting(categories: List<CategoryEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertNewStreamsIgnoringExisting(streams: List<StreamItemEntity>)
+
+    @Query("UPDATE stream_items SET isQuickFavorite = :isFav WHERE uniqueStreamKey = :uniqueStreamKey")
+    suspend fun setQuickFavorite(uniqueStreamKey: String, isFav: Boolean)
+
+    @Query("""
+        SELECT * FROM stream_items 
+        WHERE playlistId = :playlistId 
+          AND sectionType = :sectionType 
+          AND isQuickFavorite = 1 
+          AND isVisible = 1 
+          AND isLocked = 0 
+        ORDER BY name ASC
+    """)
+    fun observeQuickFavorites(
+        playlistId: Long,
+        sectionType: AetherSectionType
+    ): Flow<List<StreamItemEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun saveProgress(progress: WatchProgressEntity)
+    suspend fun createFavoriteFolder(folder: FavoriteFolderEntity): Long
 
-    @Query("DELETE FROM watch_progress WHERE contentId = :contentId")
-    suspend fun deleteProgress(contentId: String)
+    @Query("SELECT * FROM favorite_folders WHERE playlistId = :playlistId ORDER BY sortOrder ASC, folderName ASC")
+    fun observeFavoriteFolders(playlistId: Long): Flow<List<FavoriteFolderEntity>>
 
-    @Query("UPDATE watch_progress SET isFinished = 1, positionMs = 0 WHERE contentId = :contentId")
-    suspend fun markAsCompleted(contentId: String)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun addStreamToFavoriteFolder(mapping: FavoriteFolderMappingEntity)
 
-    @Query("DELETE FROM watch_progress")
-    suspend fun clearHistory()
+    @Query("DELETE FROM favorite_folder_mappings WHERE folderId = :folderId AND uniqueStreamKey = :uniqueStreamKey")
+    suspend fun removeStreamFromFavoriteFolder(folderId: Long, uniqueStreamKey: String)
+
+    @Query("""
+        SELECT s.* FROM stream_items s
+        INNER JOIN favorite_folder_mappings m ON s.uniqueStreamKey = m.uniqueStreamKey
+        WHERE m.folderId = :folderId AND s.isVisible = 1 AND s.isLocked = 0 
+        ORDER BY m.addedEpochMillis DESC
+    """)
+    fun observeStreamsInFavoriteFolder(folderId: Long): Flow<List<StreamItemEntity>>
+
+    @Query("""
+        UPDATE stream_items 
+        SET resumePositionMs = :positionMs, 
+            totalDurationMs = :durationMs, 
+            lastWatchedEpochMillis = :watchedAt 
+        WHERE uniqueStreamKey = :uniqueStreamKey
+    """)
+    suspend fun updateWatchProgress(
+        uniqueStreamKey: String,
+        positionMs: Long,
+        durationMs: Long,
+        watchedAt: Long
+    )
+
+    @Query("""
+        SELECT * FROM stream_items 
+        WHERE playlistId = :playlistId 
+          AND sectionType = :sectionType 
+          AND lastWatchedEpochMillis > 0 
+          AND isVisible = 1 
+          AND isLocked = 0 
+        ORDER BY lastWatchedEpochMillis DESC 
+        LIMIT 30
+    """)
+    fun observeRecentlyWatched(
+        playlistId: Long,
+        sectionType: AetherSectionType
+    ): Flow<List<StreamItemEntity>>
+
+    // ==========================================
+    // PHASE 2: SERIEN-EPISODEN & FORTSCHRITT
+    // ==========================================
+
+    @Query("SELECT DISTINCT seasonNumber FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey ORDER BY seasonNumber ASC")
+    suspend fun getAvailableSeasons(seriesStreamKey: String): List<Int>
+
+    @Query("SELECT * FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey AND seasonNumber = :seasonNumber ORDER BY episodeNumber ASC")
+    fun observeEpisodesForSeason(seriesStreamKey: String, seasonNumber: Int): Flow<List<SeriesEpisodeEntity>>
+
+    @Query("SELECT * FROM series_episodes WHERE uniqueEpisodeKey = :uniqueEpisodeKey LIMIT 1")
+    suspend fun getEpisodeByKey(uniqueEpisodeKey: String): SeriesEpisodeEntity?
+
+    @Query("""
+        UPDATE series_episodes 
+        SET resumePositionMs = :positionMs, 
+            durationMs = :durationMs, 
+            lastWatchedEpochMillis = :watchedAt 
+        WHERE uniqueEpisodeKey = :uniqueEpisodeKey
+    """)
+    suspend fun updateEpisodeWatchProgress(
+        uniqueEpisodeKey: String,
+        positionMs: Long,
+        durationMs: Long,
+        watchedAt: Long
+    )
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateEpisodes(episodes: List<SeriesEpisodeEntity>)
+
+    @Query("DELETE FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey")
+    suspend fun deleteEpisodesForSeries(seriesStreamKey: String)
+}
+
+@Database(
+    entities = [
+        PlaylistEntity::class,
+        CategoryEntity::class,
+        StreamItemEntity::class,
+        FavoriteFolderEntity::class,
+        FavoriteFolderMappingEntity::class,
+        EpgProgramEntity::class,
+        SeriesEpisodeEntity::class
+    ],
+    version = 2,
+    exportSchema = false
+)
+abstract class AetherDatabase : RoomDatabase() {
+    abstract fun aetherDao(): AetherDao
 }
