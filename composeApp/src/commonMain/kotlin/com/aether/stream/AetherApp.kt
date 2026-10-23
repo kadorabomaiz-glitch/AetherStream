@@ -49,7 +49,7 @@ fun AetherApp(
     val activePlaylist by dashboardViewModel.activePlaylist.collectAsState()
     val scope = rememberCoroutineScope()
 
-    var selectedCategoryKey by remember { mutableStateOf("SYS_QUICK_FAV") }
+    var selectedCategoryKey by remember { mutableStateOf("") }
     var currentPlayingStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var currentPlayingEpisode by remember { mutableStateOf<SeriesEpisodeEntity?>(null) }
     var isCinemaPlayerActive by remember { mutableStateOf(false) }
@@ -72,9 +72,25 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
+    // Sobald Kategorien für die aktuelle Sektion geladen sind, automatisch die erste echte Kategorie auswählen,
+    // damit der Nutzer niemals vor einer leeren "Favoriten"- oder "Weiter schauen"-Liste steht!
+    LaunchedEffect(visibleCategories, activeSection) {
+        if (visibleCategories.isNotEmpty()) {
+            val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
+                selectedCategoryKey == "SYS_QUICK_FAV" ||
+                selectedCategoryKey == "SYS_CONTINUE" ||
+                selectedCategoryKey == "SYS_RECENT" ||
+                selectedCategoryKey.startsWith("FOLDER_")
+
+            if (selectedCategoryKey.isEmpty() || !isCurrentKeyValid) {
+                selectedCategoryKey = visibleCategories.first().uniqueCategoryKey
+            }
+        }
+    }
+
     val streamsInSelectedCategory by remember(playlistId, activeSection, selectedCategoryKey) {
         when {
-            playlistId == 0L -> flowOf(emptyList())
+            playlistId == 0L || selectedCategoryKey.isEmpty() -> flowOf(emptyList())
             selectedCategoryKey == "SYS_RECENT" || selectedCategoryKey == "SYS_CONTINUE" ->
                 dao.observeRecentlyWatched(playlistId, activeSection)
             selectedCategoryKey == "SYS_QUICK_FAV" ->
@@ -87,9 +103,6 @@ fun AetherApp(
         }
     }.collectAsState(initial = emptyList())
 
-    // ============================================================
-    // PHASE 2: PERIODISCHER AUTO-RESUME SPEICHERTICKER (ALLE 5 SEK.)
-    // ============================================================
     val isEnginePlaying by playerEngine.isPlaying.collectAsState()
     LaunchedEffect(isEnginePlaying, currentPlayingStream, currentPlayingEpisode) {
         if (isEnginePlaying) {
@@ -128,11 +141,14 @@ fun AetherApp(
                         scope.launch {
                             dao.insertOrUpdatePlaylist(
                                 PlaylistEntity(
+                                    id = activePlaylist?.id ?: 1L,
                                     playlistName = name,
-                                    serverUrl = url,
-                                    username = user,
-                                    password = pass,
-                                    isActive = true
+                                    serverUrl = url.trim(),
+                                    username = user.trim(),
+                                    password = pass.trim(),
+                                    isActive = true,
+                                    isInitialSyncCompleted = false,
+                                    lastSyncEpochMillis = 0L
                                 )
                             )
                             dashboardViewModel.triggerManualSync()
@@ -153,17 +169,17 @@ fun AetherApp(
                     onCloseFilterDropDown = { navigationViewModel.setFilterDropDownVisible(false) },
                     onNavigateToLiveTv = {
                         isCinemaPlayerActive = false
-                        selectedCategoryKey = visibleCategories.firstOrNull()?.uniqueCategoryKey ?: "SYS_QUICK_FAV"
+                        selectedCategoryKey = ""
                         navigationViewModel.navigateTo(AetherScreen.LiveTv)
                     },
                     onNavigateToVod = {
                         isCinemaPlayerActive = false
-                        selectedCategoryKey = "SYS_CONTINUE"
+                        selectedCategoryKey = ""
                         navigationViewModel.navigateTo(AetherScreen.VodMovies)
                     },
                     onNavigateToSeries = {
                         isCinemaPlayerActive = false
-                        selectedCategoryKey = "SYS_CONTINUE"
+                        selectedCategoryKey = ""
                         navigationViewModel.navigateTo(AetherScreen.Series)
                     },
                     onNavigateToPlaylistSetup = {
@@ -269,7 +285,6 @@ fun AetherApp(
                     onPlayEpisode = { episode, seriesItem, resume ->
                         isCinemaPlayerActive = true
                         currentPlayingEpisode = episode
-                        // Synthetisches StreamItem mit der echten Episoden-URL und vollständigem Folgentitel:
                         currentPlayingStream = seriesItem.copy(
                             name = "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}",
                             streamUrl = episode.streamUrl
