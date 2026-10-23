@@ -27,12 +27,22 @@ interface AetherVideoPlayerEngine {
     val audioTracks: StateFlow<List<TrackOption>>
     val subtitleTracks: StateFlow<List<TrackOption>>
 
+    // ==========================================
+    // PHASE 2: VOD & SERIEN PLAYBACK-STATES
+    // ==========================================
+    val currentPositionMs: StateFlow<Long>
+    val durationMs: StateFlow<Long>
+    val isPlaying: StateFlow<Boolean>
+    val isPlaybackEnded: StateFlow<Boolean>
+
     fun playStream(url: String, startPositionMs: Long = 0L)
     fun applyBufferPreset(preset: StreamBufferPreset)
     fun selectAudioTrack(option: TrackOption)
     fun selectSubtitleTrack(option: TrackOption?)
     fun pause()
     fun resume()
+    fun seekTo(positionMs: Long)
+    fun seekRelativeMs(offsetMs: Long)
     fun release()
 }
 
