@@ -52,6 +52,7 @@ fun AetherApp(
     var selectedCategoryKey by remember { mutableStateOf("SYS_QUICK_FAV") }
     var currentPlayingStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var currentPlayingEpisode by remember { mutableStateOf<SeriesEpisodeEntity?>(null) }
+    var isCinemaPlayerActive by remember { mutableStateOf(false) }
     var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
 
     val playlistId = activePlaylist?.id ?: 0L
@@ -151,14 +152,17 @@ fun AetherApp(
                     onOpenFilterDropDown = { navigationViewModel.setFilterDropDownVisible(true) },
                     onCloseFilterDropDown = { navigationViewModel.setFilterDropDownVisible(false) },
                     onNavigateToLiveTv = {
+                        isCinemaPlayerActive = false
                         selectedCategoryKey = visibleCategories.firstOrNull()?.uniqueCategoryKey ?: "SYS_QUICK_FAV"
                         navigationViewModel.navigateTo(AetherScreen.LiveTv)
                     },
                     onNavigateToVod = {
+                        isCinemaPlayerActive = false
                         selectedCategoryKey = "SYS_CONTINUE"
                         navigationViewModel.navigateTo(AetherScreen.VodMovies)
                     },
                     onNavigateToSeries = {
+                        isCinemaPlayerActive = false
                         selectedCategoryKey = "SYS_CONTINUE"
                         navigationViewModel.navigateTo(AetherScreen.Series)
                     },
@@ -180,8 +184,11 @@ fun AetherApp(
                     streamsInCategory = streamsInSelectedCategory,
                     currentPlayingStream = currentPlayingStream,
                     currentChannelEpg = emptyList(),
+                    startInPureFullscreen = isCinemaPlayerActive,
+                    isVodOrSeriesMode = isCinemaPlayerActive,
                     onSelectCategory = { selectedCategoryKey = it },
                     onSelectStream = { stream ->
+                        isCinemaPlayerActive = false
                         currentPlayingEpisode = null
                         currentPlayingStream = stream
                         scope.launch {
@@ -210,7 +217,7 @@ fun AetherApp(
                         playerEngine.applyBufferPreset(nextPreset)
                     },
                     onZapChannelOffset = { offset ->
-                        if (streamsInSelectedCategory.isNotEmpty()) {
+                        if (!isCinemaPlayerActive && streamsInSelectedCategory.isNotEmpty()) {
                             val currentIndex = streamsInSelectedCategory.indexOfFirst {
                                 it.uniqueStreamKey == currentPlayingStream?.uniqueStreamKey
                             }.coerceAtLeast(0)
@@ -221,7 +228,12 @@ fun AetherApp(
                             playerEngine.playStream(nextChannel.streamUrl)
                         }
                     },
-                    onBackToDashboard = { navigationViewModel.navigateBack() }
+                    onBackToDashboard = {
+                        if (isCinemaPlayerActive) {
+                            playerEngine.pause()
+                        }
+                        navigationViewModel.navigateBack()
+                    }
                 )
             }
 
@@ -238,16 +250,46 @@ fun AetherApp(
                     itemsInGrid = streamsInSelectedCategory,
                     onSelectCategory = { selectedCategoryKey = it },
                     onPlayMediaItem = { mediaItem, resume ->
+                        isCinemaPlayerActive = true
                         currentPlayingEpisode = null
                         currentPlayingStream = mediaItem
                         val startPos = if (resume) mediaItem.resumePositionMs else 0L
+                        val now = Clock.System.now().toEpochMilliseconds()
+                        scope.launch {
+                            dao.updateWatchProgress(
+                                uniqueStreamKey = mediaItem.uniqueStreamKey,
+                                positionMs = startPos,
+                                durationMs = mediaItem.totalDurationMs,
+                                watchedAt = now
+                            )
+                        }
                         playerEngine.playStream(mediaItem.streamUrl, startPos)
                         navigationViewModel.navigateTo(AetherScreen.LiveTv)
                     },
                     onPlayEpisode = { episode, seriesItem, resume ->
+                        isCinemaPlayerActive = true
                         currentPlayingEpisode = episode
-                        currentPlayingStream = seriesItem
+                        // Synthetisches StreamItem mit der echten Episoden-URL und vollständigem Folgentitel:
+                        currentPlayingStream = seriesItem.copy(
+                            name = "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}",
+                            streamUrl = episode.streamUrl
+                        )
                         val startPos = if (resume) episode.resumePositionMs else 0L
+                        val now = Clock.System.now().toEpochMilliseconds()
+                        scope.launch {
+                            dao.updateWatchProgress(
+                                uniqueStreamKey = seriesItem.uniqueStreamKey,
+                                positionMs = startPos,
+                                durationMs = episode.durationMs,
+                                watchedAt = now
+                            )
+                            dao.updateEpisodeWatchProgress(
+                                uniqueEpisodeKey = episode.uniqueEpisodeKey,
+                                positionMs = startPos,
+                                durationMs = episode.durationMs,
+                                watchedAt = now
+                            )
+                        }
                         playerEngine.playStream(episode.streamUrl, startPos)
                         navigationViewModel.navigateTo(AetherScreen.LiveTv)
                     },
