@@ -21,11 +21,13 @@ import androidx.media3.ui.PlayerView
 import com.aether.stream.core.navigation.StreamBufferPreset
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -35,6 +37,7 @@ class AndroidMedia3PlayerEngine(
 ) : AetherVideoPlayerEngine {
 
     private val scope = CoroutineScope(Dispatchers.Main)
+    private var progressTickerJob: Job? = null
 
     private val _techMetadata = MutableStateFlow(StreamTechMetadata())
     override val techMetadata: StateFlow<StreamTechMetadata> = _techMetadata.asStateFlow()
@@ -45,23 +48,67 @@ class AndroidMedia3PlayerEngine(
     private val _subtitleTracks = MutableStateFlow<List<TrackOption>>(emptyList())
     override val subtitleTracks: StateFlow<List<TrackOption>> = _subtitleTracks.asStateFlow()
 
+    // ==========================================
+    // PHASE 2: REAKTIVE VOD & SERIEN STATES
+    // ==========================================
+    private val _currentPositionMs = MutableStateFlow(0L)
+    override val currentPositionMs: StateFlow<Long> = _currentPositionMs.asStateFlow()
+
+    private val _durationMs = MutableStateFlow(0L)
+    override val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
+
+    private val _isPlaying = MutableStateFlow(false)
+    override val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+
+    private val _isPlaybackEnded = MutableStateFlow(false)
+    override val isPlaybackEnded: StateFlow<Boolean> = _isPlaybackEnded.asStateFlow()
+
     private var currentStreamUrl: String? = null
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    // 1. playerListener MUSS vor buildExoPlayer deklariert sein (behebt die NullPointerException!)
+    // 1. playerListener MUSS strikt vor buildExoPlayer deklariert sein (behebt die NullPointerException!)
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
             _techMetadata.update { it.copy(isBuffering = buffering) }
+
             if (playbackState == Player.STATE_READY) {
                 reconnectCount = 0
                 _techMetadata.update { it.copy(reconnectAttempt = 0) }
+                updatePlaybackDurations()
             }
+
+            val ended = playbackState == Player.STATE_ENDED
+            _isPlaybackEnded.value = ended
+            if (ended) {
+                stopProgressTicker()
+                _isPlaying.value = false
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            _isPlaying.value = isPlaying
+            if (isPlaying) {
+                _isPlaybackEnded.value = false
+                startProgressTicker()
+            } else {
+                stopProgressTicker()
+                updatePlaybackDurations()
+            }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            updatePlaybackDurations()
         }
 
         override fun onTracksChanged(tracks: Tracks) {
             extractTracksAndTechSpecs(tracks)
+            updatePlaybackDurations()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -110,22 +157,54 @@ class AndroidMedia3PlayerEngine(
         if (currentStreamUrl == url && exoPlayer.isPlaying && startPositionMs == 0L) return
         currentStreamUrl = url
         reconnectCount = 0
+        _isPlaybackEnded.value = false
+        _currentPositionMs.value = startPositionMs
+
         exoPlayer.setMediaItem(MediaItem.fromUri(url), startPositionMs)
         exoPlayer.prepare()
         exoPlayer.play()
     }
 
-    // Hilfsfunktionen für Spulen und Position (ohne das fehlerhafte 'override')
-    fun seekRelativeMs(offsetMs: Long) {
+    override fun seekRelativeMs(offsetMs: Long) {
         val duration = exoPlayer.duration
         if (duration <= 0L || duration == C.TIME_UNSET) return
         val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
         exoPlayer.seekTo(target)
+        _currentPositionMs.value = target
     }
 
-    fun getCurrentPositionMs(): Long = exoPlayer.currentPosition.coerceAtLeast(0L)
+    override fun seekTo(positionMs: Long) {
+        val duration = exoPlayer.duration
+        val target = if (duration > 0L && duration != C.TIME_UNSET) {
+            positionMs.coerceIn(0L, duration)
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
+        exoPlayer.seekTo(target)
+        _currentPositionMs.value = target
+    }
 
-    fun getDurationMs(): Long = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+    private fun updatePlaybackDurations() {
+        val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val dur = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+        _currentPositionMs.value = pos
+        _durationMs.value = dur
+    }
+
+    private fun startProgressTicker() {
+        progressTickerJob?.cancel()
+        progressTickerJob = scope.launch {
+            while (isActive && exoPlayer.isPlaying) {
+                updatePlaybackDurations()
+                delay(500L)
+            }
+        }
+    }
+
+    private fun stopProgressTicker() {
+        progressTickerJob?.cancel()
+        progressTickerJob = null
+    }
 
     override fun applyBufferPreset(preset: StreamBufferPreset) {
         if (currentPreset == preset) return
@@ -133,6 +212,7 @@ class AndroidMedia3PlayerEngine(
         val activeUrl = currentStreamUrl
         val currentPos = exoPlayer.currentPosition
 
+        stopProgressTicker()
         exoPlayer.release()
         exoPlayer = buildExoPlayer(preset)
         if (activeUrl != null) {
@@ -235,9 +315,19 @@ class AndroidMedia3PlayerEngine(
         _subtitleTracks.value = subtitleList
     }
 
-    override fun pause() = exoPlayer.pause()
-    override fun resume() = exoPlayer.play()
-    override fun release() = exoPlayer.release()
+    override fun pause() {
+        stopProgressTicker()
+        exoPlayer.pause()
+    }
+
+    override fun resume() {
+        exoPlayer.play()
+    }
+
+    override fun release() {
+        stopProgressTicker()
+        exoPlayer.release()
+    }
 }
 
 @OptIn(UnstableApi::class)
