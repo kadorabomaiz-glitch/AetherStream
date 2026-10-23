@@ -14,10 +14,10 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface AetherDao {
 
-    @Query("SELECT * FROM playlists WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM playlists WHERE isActive = 1 ORDER BY id DESC LIMIT 1")
     fun observeActivePlaylist(): Flow<PlaylistEntity?>
 
-    @Query("SELECT * FROM playlists WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM playlists WHERE isActive = 1 ORDER BY id DESC LIMIT 1")
     suspend fun getActivePlaylistOnce(): PlaylistEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -222,10 +222,6 @@ interface AetherDao {
     @Query("DELETE FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey")
     suspend fun deleteEpisodesForSeries(seriesStreamKey: String)
 }
-
-// ==========================================
-// HAUPTDATENBANK (KMP / ANDROID & IOS)
-// ==========================================
 
 @Database(
     entities = [
