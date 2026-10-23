@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,6 +44,17 @@ import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.StreamItemEntity
 
+private fun formatMillisToTimecode(millis: Long): String {
+    if (millis <= 0L) return "00:00"
+    val totalSeconds = millis / 1000L
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    val minStr = minutes.toString().padStart(2, '0')
+    val secStr = seconds.toString().padStart(2, '0')
+    return if (hours > 0L) "$hours:$minStr:$secStr" else "$minStr:$secStr"
+}
+
 @Composable
 fun LiveTvDualCockpitScreen(
     playerEngine: AetherVideoPlayerEngine,
@@ -61,15 +73,20 @@ fun LiveTvDualCockpitScreen(
     onToggleLayoutMode: () -> Unit,
     onCycleBufferPreset: () -> Unit,
     onZapChannelOffset: (Int) -> Unit,
-    onBackToDashboard: () -> Unit
+    onBackToDashboard: () -> Unit,
+    startInPureFullscreen: Boolean = false,
+    isVodOrSeriesMode: Boolean = false
 ) {
-    var isExpandedToPureFullscreen by remember { mutableStateOf(false) }
+    var isExpandedToPureFullscreen by remember(startInPureFullscreen) { mutableStateOf(startInPureFullscreen) }
     var isTrackSelectorVisible by remember { mutableStateOf(false) }
     var isTiviMateOverlayVisible by remember { mutableStateOf(true) }
 
     val techSpecs by playerEngine.techMetadata.collectAsState()
     val audioTracks by playerEngine.audioTracks.collectAsState()
     val subtitleTracks by playerEngine.subtitleTracks.collectAsState()
+    val currentPosMs by playerEngine.currentPositionMs.collectAsState()
+    val durationMs by playerEngine.durationMs.collectAsState()
+    val isPlaying by playerEngine.isPlaying.collectAsState()
 
     val handleChannelClick: (StreamItemEntity) -> Unit = { clickedStream ->
         if (currentPlayingStream?.uniqueStreamKey == clickedStream.uniqueStreamKey) {
@@ -91,15 +108,22 @@ fun LiveTvDualCockpitScreen(
                 ) {
                     when (event.key) {
                         Key.DirectionUp, Key.ChannelUp -> {
-                            onZapChannelOffset(-1)
-                            true
+                            if (!isVodOrSeriesMode) {
+                                onZapChannelOffset(-1)
+                                true
+                            } else false
                         }
                         Key.DirectionDown, Key.ChannelDown -> {
-                            onZapChannelOffset(1)
-                            true
+                            if (!isVodOrSeriesMode) {
+                                onZapChannelOffset(1)
+                                true
+                            } else false
                         }
                         Key.Back, Key.Escape -> {
-                            if (isExpandedToPureFullscreen) {
+                            if (isVodOrSeriesMode) {
+                                onBackToDashboard()
+                                true
+                            } else if (isExpandedToPureFullscreen) {
                                 isExpandedToPureFullscreen = false
                                 true
                             } else {
@@ -130,6 +154,16 @@ fun LiveTvDualCockpitScreen(
                     audioTracks = audioTracks,
                     subtitleTracks = subtitleTracks,
                     isTrackSelectorOpen = isTrackSelectorVisible,
+                    isVodOrSeriesMode = isVodOrSeriesMode,
+                    isPlaying = isPlaying,
+                    currentPositionMs = currentPosMs,
+                    durationMs = durationMs,
+                    onTogglePlayPause = {
+                        if (isPlaying) playerEngine.pause() else playerEngine.resume()
+                    },
+                    onSeekRelative = { offsetMs ->
+                        playerEngine.seekRelativeMs(offsetMs)
+                    },
                     onToggleTrackSelector = { isTrackSelectorVisible = !isTrackSelectorVisible },
                     onSelectAudio = playerEngine::selectAudioTrack,
                     onSelectSubtitle = playerEngine::selectSubtitleTrack,
@@ -137,8 +171,12 @@ fun LiveTvDualCockpitScreen(
                     onZapPrevious = { onZapChannelOffset(-1) },
                     onZapNext = { onZapChannelOffset(1) },
                     onExitFullscreen = {
-                        isExpandedToPureFullscreen = false
-                        isTiviMateOverlayVisible = true
+                        if (isVodOrSeriesMode) {
+                            onBackToDashboard()
+                        } else {
+                            isExpandedToPureFullscreen = false
+                            isTiviMateOverlayVisible = true
+                        }
                     },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
@@ -601,6 +639,12 @@ private fun FullscreenPlayerHudOverlay(
     audioTracks: List<TrackOption>,
     subtitleTracks: List<TrackOption>,
     isTrackSelectorOpen: Boolean,
+    isVodOrSeriesMode: Boolean,
+    isPlaying: Boolean,
+    currentPositionMs: Long,
+    durationMs: Long,
+    onTogglePlayPause: () -> Unit,
+    onSeekRelative: (Long) -> Unit,
     onToggleTrackSelector: () -> Unit,
     onSelectAudio: (TrackOption) -> Unit,
     onSelectSubtitle: (TrackOption?) -> Unit,
@@ -625,7 +669,7 @@ private fun FullscreenPlayerHudOverlay(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = stream?.let { "${it.customChannelNumber}. ${it.name}" } ?: "LIVE STREAM",
+                text = stream?.name ?: "AETHER STREAM",
                 style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.TextPrimary)
             )
 
@@ -643,29 +687,96 @@ private fun FullscreenPlayerHudOverlay(
             }
         }
 
+        if (isVodOrSeriesMode && durationMs > 0L) {
+            Spacer(modifier = Modifier.height(10.dp))
+            val progress = (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = formatMillisToTimecode(currentPositionMs),
+                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
+                )
+                LinearProgressIndicator(
+                    progress = { progress },
+                    color = AetherColors.CyberCyan,
+                    trackColor = AetherColors.ObsidianBlack,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                )
+                Text(
+                    text = formatMillisToTimecode(durationMs),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+
         Spacer(modifier = Modifier.height(14.dp))
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AetherFocusableGlassCard(onClick = onZapPrevious, cornerRadius = 10.dp) {
-                Text(
-                    text = "▲ KANAL -",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
+            if (isVodOrSeriesMode) {
+                AetherFocusableGlassCard(onClick = onTogglePlayPause, cornerRadius = 10.dp) {
+                    Text(
+                        text = if (isPlaying) "⏸ PAUSE" else "▶️ PLAY",
+                        style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+                AetherFocusableGlassCard(onClick = { onSeekRelative(-15_000L) }, cornerRadius = 10.dp) {
+                    Text(
+                        text = "⏪ -15s",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+                AetherFocusableGlassCard(onClick = { onSeekRelative(15_000L) }, cornerRadius = 10.dp) {
+                    Text(
+                        text = "⏩ +15s",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+                AetherFocusableGlassCard(onClick = { onSeekRelative(-60_000L) }, cornerRadius = 10.dp) {
+                    Text(
+                        text = "⏪ -1 Min",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+                AetherFocusableGlassCard(onClick = { onSeekRelative(60_000L) }, cornerRadius = 10.dp) {
+                    Text(
+                        text = "⏩ +1 Min",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+            } else {
+                AetherFocusableGlassCard(onClick = onZapPrevious, cornerRadius = 10.dp) {
+                    Text(
+                        text = "▲ KANAL -",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+                AetherFocusableGlassCard(onClick = onZapNext, cornerRadius = 10.dp) {
+                    Text(
+                        text = "▼ KANAL +",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
             }
-            AetherFocusableGlassCard(onClick = onZapNext, cornerRadius = 10.dp) {
-                Text(
-                    text = "▼ KANAL +",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
+
             AetherFocusableGlassCard(onClick = onToggleTrackSelector, cornerRadius = 10.dp) {
                 Text(
-                    text = "🔊 TONSPUR & UNTERTITEL (${audioTracks.size})",
+                    text = "🔊 TON & SUB (${audioTracks.size})",
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
@@ -679,7 +790,7 @@ private fun FullscreenPlayerHudOverlay(
             }
             AetherFocusableGlassCard(onClick = onExitFullscreen, cornerRadius = 10.dp) {
                 Text(
-                    text = "⊞ ZURÜCK ZUR SENDERLISTE",
+                    text = if (isVodOrSeriesMode) "◄ ZURÜCK ZUM KATALOG" else "⊞ SENDERLISTE",
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
