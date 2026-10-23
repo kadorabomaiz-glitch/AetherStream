@@ -40,6 +40,7 @@ class AndroidMedia3PlayerEngine(
 
     companion object {
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
+        private val VOD_CONTAINER_FALLBACKS = listOf("mp4", "mkv", "ts")
     }
 
     private val scope = CoroutineScope(Dispatchers.Main)
@@ -70,7 +71,6 @@ class AndroidMedia3PlayerEngine(
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    // 1. playerListener strikt vor buildExoPlayer deklarieren
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
@@ -115,16 +115,23 @@ class AndroidMedia3PlayerEngine(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            val url = currentStreamUrl ?: return
+            val baseUrl = currentStreamUrl ?: return
             if (reconnectCount < 5) {
                 reconnectCount++
-                val lastKnownPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+                val lastKnownPos = runCatching { exoPlayer.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
                 _techMetadata.update { it.copy(reconnectAttempt = reconnectCount, isBuffering = true) }
+
+                val candidateUrl = buildSmartFallbackUrl(baseUrl, reconnectCount)
+
                 scope.launch {
                     delay(650L * reconnectCount)
-                    exoPlayer.setMediaItem(MediaItem.fromUri(url), lastKnownPos)
-                    exoPlayer.prepare()
-                    exoPlayer.play()
+                    runCatching {
+                        exoPlayer.stop()
+                        exoPlayer.clearMediaItems()
+                        exoPlayer.setMediaItem(MediaItem.fromUri(candidateUrl), lastKnownPos)
+                        exoPlayer.prepare()
+                        exoPlayer.play()
+                    }
                 }
             }
         }
@@ -133,12 +140,31 @@ class AndroidMedia3PlayerEngine(
     internal var exoPlayer: ExoPlayer = buildExoPlayer(currentPreset)
         private set
 
+    /**
+     * L10 Smart-Container-Fallback:
+     * Wenn ein VOD- oder Serien-Stream mit der gemeldeten Dateiendung fehlschlägt (z.B. .mp4 liefert 404),
+     * probiert die Engine automatisch .mkv und .ts aus!
+     */
+    private fun buildSmartFallbackUrl(originalUrl: String, attempt: Int): String {
+        val isVodOrSeries = originalUrl.contains("/movie/") || originalUrl.contains("/series/")
+        if (!isVodOrSeries || attempt <= 1) return originalUrl
+
+        val lastDotIndex = originalUrl.lastIndexOf('.')
+        val lastSlashIndex = originalUrl.lastIndexOf('/')
+        if (lastDotIndex <= lastSlashIndex) return originalUrl
+
+        val urlWithoutExt = originalUrl.substring(0, lastDotIndex)
+        val fallbackExt = VOD_CONTAINER_FALLBACKS[(attempt - 1) % VOD_CONTAINER_FALLBACKS.size]
+        return "$urlWithoutExt.$fallbackExt"
+    }
+
     private fun buildExoPlayer(preset: StreamBufferPreset): ExoPlayer {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(IPTV_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
+            .setReadTimeoutMs(25_000)
+            .setKeepPostFor302Redirects(true)
 
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
@@ -175,37 +201,45 @@ class AndroidMedia3PlayerEngine(
         _isPlaybackEnded.value = false
         _currentPositionMs.value = startPositionMs
 
-        exoPlayer.stop()
-        exoPlayer.clearMediaItems()
-        exoPlayer.setMediaItem(MediaItem.fromUri(cleanUrl), startPositionMs)
-        exoPlayer.prepare()
-        exoPlayer.play()
+        runCatching {
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+            exoPlayer.setMediaItem(MediaItem.fromUri(cleanUrl), startPositionMs)
+            exoPlayer.prepare()
+            exoPlayer.play()
+        }
     }
 
     override fun seekRelativeMs(offsetMs: Long) {
-        val duration = exoPlayer.duration
-        if (duration <= 0L || duration == C.TIME_UNSET) return
-        val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
-        exoPlayer.seekTo(target)
-        _currentPositionMs.value = target
+        runCatching {
+            val duration = exoPlayer.duration
+            if (duration <= 0L || duration == C.TIME_UNSET) return
+            val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
+            exoPlayer.seekTo(target)
+            _currentPositionMs.value = target
+        }
     }
 
     override fun seekTo(positionMs: Long) {
-        val duration = exoPlayer.duration
-        val target = if (duration > 0L && duration != C.TIME_UNSET) {
-            positionMs.coerceIn(0L, duration)
-        } else {
-            positionMs.coerceAtLeast(0L)
+        runCatching {
+            val duration = exoPlayer.duration
+            val target = if (duration > 0L && duration != C.TIME_UNSET) {
+                positionMs.coerceIn(0L, duration)
+            } else {
+                positionMs.coerceAtLeast(0L)
+            }
+            exoPlayer.seekTo(target)
+            _currentPositionMs.value = target
         }
-        exoPlayer.seekTo(target)
-        _currentPositionMs.value = target
     }
 
     private fun updatePlaybackDurations() {
-        val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
-        val dur = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
-        _currentPositionMs.value = pos
-        _durationMs.value = dur
+        runCatching {
+            val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
+            val dur = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+            if (_currentPositionMs.value != pos) _currentPositionMs.value = pos
+            if (_durationMs.value != dur) _durationMs.value = dur
+        }
     }
 
     private fun startProgressTicker() {
@@ -227,10 +261,10 @@ class AndroidMedia3PlayerEngine(
         if (currentPreset == preset) return
         currentPreset = preset
         val activeUrl = currentStreamUrl
-        val currentPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val currentPos = runCatching { exoPlayer.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
 
         stopProgressTicker()
-        exoPlayer.release()
+        runCatching { exoPlayer.release() }
         exoPlayer = buildExoPlayer(preset)
         if (activeUrl != null) {
             playStream(activeUrl, currentPos)
@@ -238,32 +272,36 @@ class AndroidMedia3PlayerEngine(
     }
 
     override fun selectAudioTrack(option: TrackOption) {
-        val groups = exoPlayer.currentTracks.groups
-        if (option.groupIndex in groups.indices) {
-            val group = groups[option.groupIndex].mediaTrackGroup
-            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                .buildUpon()
-                .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
-                .build()
+        runCatching {
+            val groups = exoPlayer.currentTracks.groups
+            if (option.groupIndex in groups.indices) {
+                val group = groups[option.groupIndex].mediaTrackGroup
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                    .buildUpon()
+                    .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
+                    .build()
+            }
         }
     }
 
     override fun selectSubtitleTrack(option: TrackOption?) {
-        if (option == null) {
-            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                .buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
-            return
-        }
-        val groups = exoPlayer.currentTracks.groups
-        if (option.groupIndex in groups.indices) {
-            val group = groups[option.groupIndex].mediaTrackGroup
-            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                .buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
-                .build()
+        runCatching {
+            if (option == null) {
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                    .buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    .build()
+                return
+            }
+            val groups = exoPlayer.currentTracks.groups
+            if (option.groupIndex in groups.indices) {
+                val group = groups[option.groupIndex].mediaTrackGroup
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                    .buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
+                    .build()
+            }
         }
     }
 
@@ -334,16 +372,16 @@ class AndroidMedia3PlayerEngine(
 
     override fun pause() {
         stopProgressTicker()
-        exoPlayer.pause()
+        runCatching { exoPlayer.pause() }
     }
 
     override fun resume() {
-        exoPlayer.play()
+        runCatching { exoPlayer.play() }
     }
 
     override fun release() {
         stopProgressTicker()
-        exoPlayer.release()
+        runCatching { exoPlayer.release() }
     }
 }
 
