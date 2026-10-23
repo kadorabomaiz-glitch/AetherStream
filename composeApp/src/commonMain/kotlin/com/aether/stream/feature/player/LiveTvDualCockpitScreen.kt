@@ -21,6 +21,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +35,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aether.stream.core.navigation.LiveTvLayoutMode
 import com.aether.stream.core.navigation.StreamBufferPreset
@@ -43,6 +45,7 @@ import com.aether.stream.data.local.CategoryEntity
 import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.StreamItemEntity
+import kotlinx.coroutines.delay
 
 private fun formatMillisToTimecode(millis: Long): String {
     if (millis <= 0L) return "00:00"
@@ -78,6 +81,8 @@ fun LiveTvDualCockpitScreen(
     isVodOrSeriesMode: Boolean = false
 ) {
     var isExpandedToPureFullscreen by remember(startInPureFullscreen) { mutableStateOf(startInPureFullscreen) }
+    var isFullscreenHudVisible by remember { mutableStateOf(true) }
+    var hudActivityTick by remember { mutableStateOf(0) }
     var isTrackSelectorVisible by remember { mutableStateOf(false) }
     var isTiviMateOverlayVisible by remember { mutableStateOf(true) }
 
@@ -88,9 +93,22 @@ fun LiveTvDualCockpitScreen(
     val durationMs by playerEngine.durationMs.collectAsState()
     val isPlaying by playerEngine.isPlaying.collectAsState()
 
+    val isPureFullscreenActive = isExpandedToPureFullscreen ||
+        (layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD && !isTiviMateOverlayVisible)
+
+    // Automatisches Ausblenden des Vollbild-HUDs nach 4,5 Sekunden für 100% freies Videobild!
+    LaunchedEffect(isPureFullscreenActive, isFullscreenHudVisible, hudActivityTick, isTrackSelectorVisible) {
+        if (isPureFullscreenActive && isFullscreenHudVisible && !isTrackSelectorVisible) {
+            delay(4500L)
+            isFullscreenHudVisible = false
+        }
+    }
+
     val handleChannelClick: (StreamItemEntity) -> Unit = { clickedStream ->
         if (currentPlayingStream?.uniqueStreamKey == clickedStream.uniqueStreamKey) {
             isExpandedToPureFullscreen = true
+            isFullscreenHudVisible = true
+            hudActivityTick++
         } else {
             onSelectStream(clickedStream)
             playerEngine.playStream(clickedStream.streamUrl)
@@ -102,25 +120,54 @@ fun LiveTvDualCockpitScreen(
             .fillMaxSize()
             .background(AetherColors.ObsidianBlack)
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp &&
-                    (isExpandedToPureFullscreen ||
-                        (layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD && !isTiviMateOverlayVisible))
-                ) {
+                if (event.type == KeyEventType.KeyUp && isPureFullscreenActive) {
+                    hudActivityTick++
                     when (event.key) {
+                        Key.DirectionCenter, Key.Enter -> {
+                            if (!isFullscreenHudVisible) {
+                                isFullscreenHudVisible = true
+                                true
+                            } else false
+                        }
+                        Key.DirectionLeft -> {
+                            if (!isFullscreenHudVisible && isVodOrSeriesMode) {
+                                playerEngine.seekRelativeMs(-15_000L)
+                                isFullscreenHudVisible = true
+                                true
+                            } else false
+                        }
+                        Key.DirectionRight -> {
+                            if (!isFullscreenHudVisible && isVodOrSeriesMode) {
+                                playerEngine.seekRelativeMs(15_000L)
+                                isFullscreenHudVisible = true
+                                true
+                            } else false
+                        }
                         Key.DirectionUp, Key.ChannelUp -> {
                             if (!isVodOrSeriesMode) {
                                 onZapChannelOffset(-1)
+                                isFullscreenHudVisible = true
+                                true
+                            } else if (!isFullscreenHudVisible) {
+                                isFullscreenHudVisible = true
                                 true
                             } else false
                         }
                         Key.DirectionDown, Key.ChannelDown -> {
                             if (!isVodOrSeriesMode) {
                                 onZapChannelOffset(1)
+                                isFullscreenHudVisible = true
+                                true
+                            } else if (!isFullscreenHudVisible) {
+                                isFullscreenHudVisible = true
                                 true
                             } else false
                         }
                         Key.Back, Key.Escape -> {
-                            if (isVodOrSeriesMode) {
+                            if (isTrackSelectorVisible) {
+                                isTrackSelectorVisible = false
+                                true
+                            } else if (isVodOrSeriesMode) {
                                 onBackToDashboard()
                                 true
                             } else if (isExpandedToPureFullscreen) {
@@ -139,47 +186,67 @@ fun LiveTvDualCockpitScreen(
             }
     ) {
         when {
-            isExpandedToPureFullscreen ||
-                (layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD && !isTiviMateOverlayVisible) -> {
-
+            isPureFullscreenActive -> {
                 AetherVideoSurface(
                     engine = playerEngine,
                     modifier = Modifier.fillMaxSize()
                 )
 
-                FullscreenPlayerHudOverlay(
-                    stream = currentPlayingStream,
-                    techSpecs = techSpecs,
-                    currentBufferPreset = currentBufferPreset,
-                    audioTracks = audioTracks,
-                    subtitleTracks = subtitleTracks,
-                    isTrackSelectorOpen = isTrackSelectorVisible,
-                    isVodOrSeriesMode = isVodOrSeriesMode,
-                    isPlaying = isPlaying,
-                    currentPositionMs = currentPosMs,
-                    durationMs = durationMs,
-                    onTogglePlayPause = {
-                        if (isPlaying) playerEngine.pause() else playerEngine.resume()
-                    },
-                    onSeekRelative = { offsetMs ->
-                        playerEngine.seekRelativeMs(offsetMs)
-                    },
-                    onToggleTrackSelector = { isTrackSelectorVisible = !isTrackSelectorVisible },
-                    onSelectAudio = playerEngine::selectAudioTrack,
-                    onSelectSubtitle = playerEngine::selectSubtitleTrack,
-                    onCycleBuffer = onCycleBufferPreset,
-                    onZapPrevious = { onZapChannelOffset(-1) },
-                    onZapNext = { onZapChannelOffset(1) },
-                    onExitFullscreen = {
-                        if (isVodOrSeriesMode) {
-                            onBackToDashboard()
-                        } else {
-                            isExpandedToPureFullscreen = false
-                            isTiviMateOverlayVisible = true
-                        }
-                    },
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                )
+                if (isFullscreenHudVisible) {
+                    FullscreenPlayerHudOverlay(
+                        stream = currentPlayingStream,
+                        techSpecs = techSpecs,
+                        currentBufferPreset = currentBufferPreset,
+                        audioTracks = audioTracks,
+                        subtitleTracks = subtitleTracks,
+                        isTrackSelectorOpen = isTrackSelectorVisible,
+                        isVodOrSeriesMode = isVodOrSeriesMode,
+                        isPlaying = isPlaying,
+                        currentPositionMs = currentPosMs,
+                        durationMs = durationMs,
+                        onTogglePlayPause = {
+                            hudActivityTick++
+                            if (isPlaying) playerEngine.pause() else playerEngine.resume()
+                        },
+                        onSeekRelative = { offsetMs ->
+                            hudActivityTick++
+                            playerEngine.seekRelativeMs(offsetMs)
+                        },
+                        onToggleTrackSelector = {
+                            hudActivityTick++
+                            isTrackSelectorVisible = !isTrackSelectorVisible
+                        },
+                        onSelectAudio = {
+                            hudActivityTick++
+                            playerEngine.selectAudioTrack(it)
+                        },
+                        onSelectSubtitle = {
+                            hudActivityTick++
+                            playerEngine.selectSubtitleTrack(it)
+                        },
+                        onCycleBuffer = {
+                            hudActivityTick++
+                            onCycleBufferPreset()
+                        },
+                        onZapPrevious = {
+                            hudActivityTick++
+                            onZapChannelOffset(-1)
+                        },
+                        onZapNext = {
+                            hudActivityTick++
+                            onZapChannelOffset(1)
+                        },
+                        onExitFullscreen = {
+                            if (isVodOrSeriesMode) {
+                                onBackToDashboard()
+                            } else {
+                                isExpandedToPureFullscreen = false
+                                isTiviMateOverlayVisible = true
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                    )
+                }
             }
 
             layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD -> {
@@ -225,6 +292,8 @@ fun LiveTvDualCockpitScreen(
                             onChannelClick = { stream ->
                                 if (currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey) {
                                     isTiviMateOverlayVisible = false
+                                    isFullscreenHudVisible = true
+                                    hudActivityTick++
                                 } else {
                                     onSelectStream(stream)
                                     playerEngine.playStream(stream.streamUrl)
@@ -240,7 +309,11 @@ fun LiveTvDualCockpitScreen(
                         EpgProgramListPanel(
                             epgList = currentChannelEpg,
                             currentStream = currentPlayingStream,
-                            onExpandFullscreen = { isTiviMateOverlayVisible = false },
+                            onExpandFullscreen = {
+                                isTiviMateOverlayVisible = false
+                                isFullscreenHudVisible = true
+                                hudActivityTick++
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
@@ -298,7 +371,11 @@ fun LiveTvDualCockpitScreen(
                                 .fillMaxHeight()
                         ) {
                             AetherFocusableGlassCard(
-                                onClick = { isExpandedToPureFullscreen = true },
+                                onClick = {
+                                    isExpandedToPureFullscreen = true
+                                    isFullscreenHudVisible = true
+                                    hudActivityTick++
+                                },
                                 cornerRadius = 18.dp,
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -343,7 +420,11 @@ fun LiveTvDualCockpitScreen(
                             EpgProgramListPanel(
                                 epgList = currentChannelEpg,
                                 currentStream = currentPlayingStream,
-                                onExpandFullscreen = { isExpandedToPureFullscreen = true },
+                                onExpandFullscreen = {
+                                    isExpandedToPureFullscreen = true
+                                    isFullscreenHudVisible = true
+                                    hudActivityTick++
+                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f)
@@ -484,6 +565,8 @@ private fun CategoryItemButton(
     ) {
         Text(
             text = title,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.titleMedium.copy(
                 color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
             ),
@@ -540,6 +623,8 @@ private fun ChannelColumnList(
                         )
                         Text(
                             text = stream.name,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.titleMedium.copy(
                                 color = if (isPlaying) AetherColors.CyberCyan else AetherColors.TextPrimary
                             )
@@ -585,8 +670,12 @@ private fun EpgProgramListPanel(
         ) {
             Text(
                 text = currentStream?.name ?: "Kein Sender ausgewählt",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.CyberCyan)
             )
+            Spacer(modifier = Modifier.width(10.dp))
             AetherFocusableGlassCard(onClick = onExpandFullscreen, cornerRadius = 8.dp) {
                 Text(
                     text = "⛶ VOLLBILD",
@@ -657,11 +746,11 @@ private fun FullscreenPlayerHudOverlay(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(24.dp)
+            .padding(horizontal = 28.dp, vertical = 20.dp)
             .clip(RoundedCornerShape(20.dp))
-            .background(AetherColors.GlassSurface)
+            .background(AetherColors.ObsidianBlack.copy(alpha = 0.90f))
             .border(1.5.dp, AetherColors.CyberCyan, RoundedCornerShape(20.dp))
-            .padding(20.dp)
+            .padding(horizontal = 22.dp, vertical = 16.dp)
     ) {
         Row(
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -670,18 +759,25 @@ private fun FullscreenPlayerHudOverlay(
         ) {
             Text(
                 text = stream?.name ?: "AETHER STREAM",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.TextPrimary)
             )
+
+            Spacer(modifier = Modifier.width(16.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (techSpecs.reconnectAttempt > 0) {
                     Text(
-                        text = "⚡ STREAM-AIRBAG RECONNECT (${techSpecs.reconnectAttempt}/5)",
+                        text = "⚡ RECONNECT (${techSpecs.reconnectAttempt}/5)",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.LaserAmber)
                     )
                 }
                 Text(
                     text = "${techSpecs.resolutionLabel} • ${techSpecs.fpsLabel} • ${techSpecs.videoCodec} • ${techSpecs.audioCodec}",
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
                 )
             }
@@ -697,12 +793,13 @@ private fun FullscreenPlayerHudOverlay(
             ) {
                 Text(
                     text = formatMillisToTimecode(currentPositionMs),
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
                 )
                 LinearProgressIndicator(
                     progress = { progress },
                     color = AetherColors.CyberCyan,
-                    trackColor = AetherColors.ObsidianBlack,
+                    trackColor = AetherColors.DeepSpaceNavy,
                     modifier = Modifier
                         .weight(1f)
                         .height(6.dp)
@@ -710,57 +807,57 @@ private fun FullscreenPlayerHudOverlay(
                 )
                 Text(
                     text = formatMillisToTimecode(durationMs),
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
         ) {
             if (isVodOrSeriesMode) {
                 AetherFocusableGlassCard(onClick = onTogglePlayPause, cornerRadius = 10.dp) {
                     Text(
                         text = if (isPlaying) "⏸ PAUSE" else "▶️ PLAY",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                     )
                 }
                 AetherFocusableGlassCard(onClick = { onSeekRelative(-15_000L) }, cornerRadius = 10.dp) {
                     Text(
                         text = "⏪ -15s",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
                 }
                 AetherFocusableGlassCard(onClick = { onSeekRelative(15_000L) }, cornerRadius = 10.dp) {
                     Text(
                         text = "⏩ +15s",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
-                    )
-                }
-                AetherFocusableGlassCard(onClick = { onSeekRelative(-60_000L) }, cornerRadius = 10.dp) {
-                    Text(
-                        text = "⏪ -1 Min",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
                 }
                 AetherFocusableGlassCard(onClick = { onSeekRelative(60_000L) }, cornerRadius = 10.dp) {
                     Text(
                         text = "⏩ +1 Min",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
                 }
             } else {
                 AetherFocusableGlassCard(onClick = onZapPrevious, cornerRadius = 10.dp) {
                     Text(
                         text = "▲ KANAL -",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
@@ -768,6 +865,7 @@ private fun FullscreenPlayerHudOverlay(
                 AetherFocusableGlassCard(onClick = onZapNext, cornerRadius = 10.dp) {
                     Text(
                         text = "▼ KANAL +",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
@@ -777,6 +875,7 @@ private fun FullscreenPlayerHudOverlay(
             AetherFocusableGlassCard(onClick = onToggleTrackSelector, cornerRadius = 10.dp) {
                 Text(
                     text = "🔊 TON & SUB (${audioTracks.size})",
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
@@ -784,13 +883,15 @@ private fun FullscreenPlayerHudOverlay(
             AetherFocusableGlassCard(onClick = onCycleBuffer, cornerRadius = 10.dp) {
                 Text(
                     text = "🛡️ ${currentBufferPreset.title}",
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
             }
             AetherFocusableGlassCard(onClick = onExitFullscreen, cornerRadius = 10.dp) {
                 Text(
-                    text = if (isVodOrSeriesMode) "◄ ZURÜCK ZUM KATALOG" else "⊞ SENDERLISTE",
+                    text = if (isVodOrSeriesMode) "◄ ZURÜCK" else "⊞ SENDERLISTE",
+                    maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
@@ -817,6 +918,7 @@ private fun FullscreenPlayerHudOverlay(
                         ) {
                             Text(
                                 text = "${if (track.isSelected) "● " else "○ "}${track.languageLabel} (${track.codecLabel})",
+                                maxLines = 1,
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                             )
@@ -836,6 +938,7 @@ private fun FullscreenPlayerHudOverlay(
                     ) {
                         Text(
                             text = "Untertitel deaktivieren",
+                            maxLines = 1,
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                         )
@@ -851,6 +954,7 @@ private fun FullscreenPlayerHudOverlay(
                         ) {
                             Text(
                                 text = "${if (sub.isSelected) "● " else "○ "}${sub.languageLabel}",
+                                maxLines = 1,
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                             )
