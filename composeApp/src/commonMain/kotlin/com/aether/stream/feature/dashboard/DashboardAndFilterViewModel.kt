@@ -105,12 +105,18 @@ class DashboardAndFilterViewModel(
         }
     }
 
-    /**
-     * Phase 2: Lädt Staffeln und Episoden einer Serie bei Bedarf herunter.
-     */
     suspend fun fetchSeriesEpisodesOnDemand(seriesItem: StreamItemEntity): Boolean {
         val playlist = activePlaylist.value ?: dao.getActivePlaylistOnce() ?: return false
         return syncRepository.fetchAndStoreSeriesEpisodes(playlist, seriesItem)
+    }
+
+    suspend fun fetchCategoryStreamsOnDemand(category: CategoryEntity): Boolean {
+        val playlist = activePlaylist.value ?: dao.getActivePlaylistOnce() ?: return false
+        return when (category.sectionType) {
+            AetherSectionType.VOD -> syncRepository.fetchVodStreamsForCategory(playlist, category)
+            AetherSectionType.SERIES -> syncRepository.fetchSeriesForCategory(playlist, category)
+            else -> false
+        }
     }
 
     fun onPinInputChanged(pin: String) {
