@@ -16,19 +16,24 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,20 +43,27 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.aether.stream.core.theme.AetherColors
 import com.aether.stream.core.ui.AetherFocusableGlassCard
+import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.CategoryEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
+import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 @Composable
 fun VodAndSeriesCinemaScreen(
     sectionType: AetherSectionType,
+    dao: AetherDao,
+    onRequestSeriesEpisodes: (suspend (StreamItemEntity) -> Boolean)? = null,
     categories: List<CategoryEntity>,
     favoriteFolders: List<FavoriteFolderEntity>,
     selectedCategoryKey: String,
     itemsInGrid: List<StreamItemEntity>,
     onSelectCategory: (String) -> Unit,
     onPlayMediaItem: (StreamItemEntity, Boolean) -> Unit,
+    onPlayEpisode: (SeriesEpisodeEntity, StreamItemEntity, Boolean) -> Unit,
     onToggleQuickFavorite: (StreamItemEntity) -> Unit,
     onOpenFavoriteFolderModal: (StreamItemEntity) -> Unit,
     onBackToDashboard: () -> Unit
@@ -171,21 +183,40 @@ fun VodAndSeriesCinemaScreen(
     }
 
     selectedDetailItem?.let { item ->
-        VodSeriesDetailModal(
-            item = item,
-            onPlayFromStart = {
-                selectedDetailItem = null
-                onPlayMediaItem(item, false)
-            },
-            onResumePlayback = {
-                selectedDetailItem = null
-                onPlayMediaItem(item, true)
-            },
-            onOpenFolderManager = {
-                onOpenFavoriteFolderModal(item)
-            },
-            onDismiss = { selectedDetailItem = null }
-        )
+        if (item.sectionType == AetherSectionType.SERIES) {
+            // ==========================================
+            // PHASE 2: SERIEN-DETAIL-COCKPIT
+            // ==========================================
+            SeriesDetailCockpitModal(
+                seriesItem = item,
+                dao = dao,
+                onRequestEpisodes = onRequestSeriesEpisodes,
+                onPlayEpisode = { episode, resume ->
+                    onPlayEpisode(episode, item, resume)
+                },
+                onOpenFolderManager = { onOpenFavoriteFolderModal(item) },
+                onDismiss = { selectedDetailItem = null }
+            )
+        } else {
+            // ==========================================
+            // VOD FILM-DETAIL-MODAL
+            // ==========================================
+            VodSeriesDetailModal(
+                item = item,
+                onPlayFromStart = {
+                    selectedDetailItem = null
+                    onPlayMediaItem(item, false)
+                },
+                onResumePlayback = {
+                    selectedDetailItem = null
+                    onPlayMediaItem(item, true)
+                },
+                onOpenFolderManager = {
+                    onOpenFavoriteFolderModal(item)
+                },
+                onDismiss = { selectedDetailItem = null }
+            )
+        }
     }
 }
 
@@ -296,6 +327,240 @@ private fun PosterGridCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SeriesDetailCockpitModal(
+    seriesItem: StreamItemEntity,
+    dao: AetherDao,
+    onRequestEpisodes: (suspend (StreamItemEntity) -> Boolean)?,
+    onPlayEpisode: (SeriesEpisodeEntity, Boolean) -> Unit,
+    onOpenFolderManager: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var isLoadingEpisodes by remember { mutableStateOf(false) }
+    var availableSeasons by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var selectedSeason by remember { mutableStateOf<Int?>(null) }
+
+    LaunchedEffect(seriesItem.uniqueStreamKey) {
+        val existingSeasons = dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
+        if (existingSeasons.isEmpty() && onRequestEpisodes != null) {
+            isLoadingEpisodes = true
+            onRequestEpisodes(seriesItem)
+            val updatedSeasons = dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
+            availableSeasons = updatedSeasons
+            selectedSeason = updatedSeasons.firstOrNull()
+            isLoadingEpisodes = false
+        } else {
+            availableSeasons = existingSeasons
+            selectedSeason = existingSeasons.firstOrNull()
+        }
+    }
+
+    val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
+        val season = selectedSeason
+        if (season != null) {
+            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
+        } else {
+            flowOf(emptyList())
+        }
+    }.collectAsState(initial = emptyList())
+
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .width(960.dp)
+                .height(580.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(AetherColors.DeepSpaceNavy)
+                .border(2.dp, AetherColors.CyberCyan, RoundedCornerShape(24.dp))
+                .padding(26.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // Linke Spalte: Serien-Metadaten
+                Column(
+                    modifier = Modifier
+                        .width(300.dp)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = seriesItem.name,
+                            style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (!seriesItem.rating.isNullOrBlank()) "⭐ ${seriesItem.rating}" else "HD Serie",
+                            style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = seriesItem.plotDescription ?: "Keine Inhaltsangabe verfügbar.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 8,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        AetherFocusableGlassCard(onClick = onOpenFolderManager, cornerRadius = 10.dp) {
+                            Text(
+                                text = "📁 IN FAVORITEN-ORDNER",
+                                style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                        AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 10.dp) {
+                            Text(
+                                text = "SCHLIESSEN ✕",
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Rechte Spalte: Staffeln & Folgen
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                ) {
+                    if (isLoadingEpisodes) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = AetherColors.CyberCyan)
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    text = "Lade Staffeln & Episoden...",
+                                    style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
+                                )
+                            }
+                        }
+                    } else if (availableSeasons.isEmpty()) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            Text(
+                                text = "Keine Episoden für diese Serie verfügbar.",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    } else {
+                        // Horizontale Staffel-Pills (D-Pad Links/Rechts)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(availableSeasons, key = { it }) { seasonNum ->
+                                val isSelected = selectedSeason == seasonNum
+                                AetherFocusableGlassCard(
+                                    onClick = { selectedSeason = seasonNum },
+                                    isSelected = isSelected,
+                                    cornerRadius = 8.dp
+                                ) {
+                                    Text(
+                                        text = "Staffel $seasonNum",
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Vertikale Episodenliste
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            items(episodesForSeason, key = { it.uniqueEpisodeKey }) { ep ->
+                                EpisodeRowCard(
+                                    episode = ep,
+                                    onPlayClick = { resume ->
+                                        onPlayEpisode(ep, resume)
+                                        onDismiss()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EpisodeRowCard(
+    episode: SeriesEpisodeEntity,
+    onPlayClick: (Boolean) -> Unit
+) {
+    val hasResume = episode.resumePositionMs > 30_000L
+    AetherFocusableGlassCard(
+        onClick = { onPlayClick(hasResume) },
+        cornerRadius = 10.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) { isFocused ->
+        Row(
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Folge ${episode.episodeNumber}: ${episode.title}",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (!episode.plotDescription.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = episode.plotDescription,
+                        style = MaterialTheme.typography.bodySmall.copy(color = AetherColors.TextSecondary),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (episode.resumePositionMs > 0L && episode.durationMs > 0L) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val progress = (episode.resumePositionMs.toFloat() / episode.durationMs.toFloat()).coerceIn(0.05f, 1f)
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        color = AetherColors.CyberCyan,
+                        trackColor = AetherColors.DeepSpaceNavy,
+                        modifier = Modifier
+                            .fillMaxWidth(0.5f)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            Text(
+                text = if (hasResume) "▶️ Fortsetzen" else "▶️ Abspielen",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan
+                )
+            )
         }
     }
 }
@@ -623,7 +888,7 @@ fun XtreamPlaylistSetupScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 14.dp)
-                        ) {
+                    ) {
                         Text(
                             text = "VERBINDEN & SENDER LADEN",
                             style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
