@@ -72,8 +72,6 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // Sobald Kategorien für die aktuelle Sektion geladen sind, automatisch die erste echte Kategorie auswählen,
-    // damit der Nutzer niemals vor einer leeren "Favoriten"- oder "Weiter schauen"-Liste steht!
     LaunchedEffect(visibleCategories, activeSection) {
         if (visibleCategories.isNotEmpty()) {
             val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
@@ -260,6 +258,9 @@ fun AetherApp(
                     onRequestSeriesEpisodes = { seriesItem ->
                         dashboardViewModel.fetchSeriesEpisodesOnDemand(seriesItem)
                     },
+                    onRequestCategoryStreams = { categoryItem ->
+                        dashboardViewModel.fetchCategoryStreamsOnDemand(categoryItem)
+                    },
                     categories = visibleCategories,
                     favoriteFolders = favoriteFolders,
                     selectedCategoryKey = selectedCategoryKey,
@@ -285,8 +286,13 @@ fun AetherApp(
                     onPlayEpisode = { episode, seriesItem, resume ->
                         isCinemaPlayerActive = true
                         currentPlayingEpisode = episode
+                        val cleanDisplayTitle = if (episode.title.contains(seriesItem.name, ignoreCase = true)) {
+                            episode.title
+                        } else {
+                            "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
+                        }
                         currentPlayingStream = seriesItem.copy(
-                            name = "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}",
+                            name = cleanDisplayTitle,
                             streamUrl = episode.streamUrl
                         )
                         val startPos = if (resume) episode.resumePositionMs else 0L
