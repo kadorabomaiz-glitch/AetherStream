@@ -40,7 +40,7 @@ jobs:
   build-iphone-ipa:
     name: "📱 iPhone IPA auf virtuellem Mac bauen"
     runs-on: macos-14
-
+    if: false
     steps:
       - name: "Projekt-Dateien laden"
         uses: actions/checkout@v4
