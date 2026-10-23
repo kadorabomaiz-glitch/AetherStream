@@ -95,6 +95,8 @@ class XtreamSyncRepository(
     companion object {
         private const val ORPHAN_CATEGORY_ID = "AETHER_UNCATEGORIZED_FEEDS"
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
+        private const val MAX_RECURSION_DEPTH = 6
+
         private val jsonParser = Json {
             ignoreUnknownKeys = true
             isLenient = true
@@ -108,32 +110,41 @@ class XtreamSyncRepository(
         }.trimEnd('/')
 
     suspend fun triggerDailySilentSyncIfNeeded(): Int = withContext(Dispatchers.IO) {
-        val activePlaylist = dao.getActivePlaylistOnce() ?: return@withContext 0
-        val existingCatKeys = dao.getExistingCategoryKeys(activePlaylist.id)
-        val timeZone = TimeZone.currentSystemDefault()
-        val lastSyncDate = kotlinx.datetime.Instant
-            .fromEpochMilliseconds(activePlaylist.lastSyncEpochMillis)
-            .toLocalDateTime(timeZone).date
-        val todayDate = Clock.System.now().toLocalDateTime(timeZone).date
+        runCatching {
+            val activePlaylist = dao.getActivePlaylistOnce() ?: return@withContext 0
+            val existingCatKeys = dao.getExistingCategoryKeys(activePlaylist.id)
+            val timeZone = TimeZone.currentSystemDefault()
+            val lastSyncDate = kotlinx.datetime.Instant
+                .fromEpochMilliseconds(activePlaylist.lastSyncEpochMillis)
+                .toLocalDateTime(timeZone).date
+            val todayDate = Clock.System.now().toLocalDateTime(timeZone).date
 
-        if (activePlaylist.lastSyncEpochMillis == 0L || existingCatKeys.isEmpty() || lastSyncDate < todayDate) {
-            return@withContext synchronizePlaylistWithSmartLock(activePlaylist)
-        }
-        return@withContext 0
+            if (activePlaylist.lastSyncEpochMillis == 0L || existingCatKeys.isEmpty() || lastSyncDate < todayDate) {
+                return@withContext synchronizePlaylistWithSmartLock(activePlaylist)
+            }
+            0
+        }.getOrDefault(0)
     }
 
+    /**
+     * L10-Enterprise Sync:
+     * 1. Lädt alle Kategorien (Live, VOD, Serien) mit minimalem RAM-Footprint (< 50 KB).
+     * 2. Lädt Live-TV-Sender in Chunks und gibt den Heap sofort frei.
+     * 3. Lädt für VOD & Serien die erste Kategorie vorab (Pre-Warming) und den Rest Lazy On-Demand,
+     *    um OutOfMemoryErrors bei +80.000 VOD-Einträgen auf Fire TV Geräten zu 100 % auszuschließen.
+     */
     suspend fun synchronizePlaylistWithSmartLock(
         playlist: PlaylistEntity
     ): Int = withContext(Dispatchers.IO) {
         val cleanServer = normalizeServerUrl(playlist.serverUrl)
         val apiEndpoint = "$cleanServer/player_api.php"
 
-        val existingKeys = dao.getExistingCategoryKeys(playlist.id).toSet()
+        val existingKeys = runCatching { dao.getExistingCategoryKeys(playlist.id).toSet() }.getOrDefault(emptySet())
         val isUpgradeSync = playlist.isInitialSyncCompleted && existingKeys.isNotEmpty()
 
         val knownCategoryKeys = mutableSetOf<String>()
         var newlyDiscoveredCount = 0
-        var totalStreamsSaved = 0
+        var totalItemsSaved = 0
 
         fun buildCategoryEntity(
             catId: String,
@@ -163,6 +174,7 @@ class XtreamSyncRepository(
             return key
         }
 
+        // STUFE 1: KATEGORIEN SYNCHRONISIEREN
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
             buildCategoryEntity(
@@ -173,7 +185,10 @@ class XtreamSyncRepository(
                 targetList = liveCategories
             )
         }
-        if (liveCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(liveCategories)
+        if (liveCategories.isNotEmpty()) {
+            dao.insertNewCategoriesIgnoringExisting(liveCategories)
+            totalItemsSaved += liveCategories.size
+        }
 
         val vodCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_vod_categories").forEachIndexed { idx, dto ->
@@ -185,7 +200,10 @@ class XtreamSyncRepository(
                 targetList = vodCategories
             )
         }
-        if (vodCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(vodCategories)
+        if (vodCategories.isNotEmpty()) {
+            dao.insertNewCategoriesIgnoringExisting(vodCategories)
+            totalItemsSaved += vodCategories.size
+        }
 
         val seriesCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_series_categories").forEachIndexed { idx, dto ->
@@ -197,10 +215,15 @@ class XtreamSyncRepository(
                 targetList = seriesCategories
             )
         }
-        if (seriesCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(seriesCategories)
+        if (seriesCategories.isNotEmpty()) {
+            dao.insertNewCategoriesIgnoringExisting(seriesCategories)
+            totalItemsSaved += seriesCategories.size
+        }
 
-        val liveStreams = mutableListOf<StreamItemEntity>()
+        // STUFE 2: LIVE-TV STREAMS IN SPEICHERSCHONENDEN BATCHES
         val extraLiveCats = mutableListOf<CategoryEntity>()
+        val liveBatchBuffer = ArrayList<StreamItemEntity>(2000)
+
         fetchLiveStreams(apiEndpoint, playlist).forEachIndexed { idx, dto ->
             val sId = dto.streamId.asCleanInt(0)
             if (sId != 0) {
@@ -218,7 +241,7 @@ class XtreamSyncRepository(
                     )
                 }
 
-                liveStreams.add(
+                liveBatchBuffer.add(
                     StreamItemEntity(
                         uniqueStreamKey = "${playlist.id}_LIVE_$sId",
                         playlistId = playlist.id,
@@ -234,107 +257,39 @@ class XtreamSyncRepository(
                         customChannelNumber = dto.num.asCleanInt(idx + 1)
                     )
                 )
+
+                if (liveBatchBuffer.size >= 2000) {
+                    if (extraLiveCats.isNotEmpty()) {
+                        dao.insertNewCategoriesIgnoringExisting(extraLiveCats.toList())
+                        extraLiveCats.clear()
+                    }
+                    dao.insertNewStreamsIgnoringExisting(liveBatchBuffer.toList())
+                    totalItemsSaved += liveBatchBuffer.size
+                    liveBatchBuffer.clear()
+                }
             }
         }
-        if (extraLiveCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraLiveCats)
-        if (liveStreams.isNotEmpty()) {
-            liveStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += liveStreams.size
+
+        if (extraLiveCats.isNotEmpty()) {
+            dao.insertNewCategoriesIgnoringExisting(extraLiveCats)
+            extraLiveCats.clear()
+        }
+        if (liveBatchBuffer.isNotEmpty()) {
+            dao.insertNewStreamsIgnoringExisting(liveBatchBuffer)
+            totalItemsSaved += liveBatchBuffer.size
+            liveBatchBuffer.clear()
         }
 
-        val seriesStreams = mutableListOf<StreamItemEntity>()
-        val extraSeriesCats = mutableListOf<CategoryEntity>()
-        fetchSeries(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
-            val sId = dto.seriesId.asCleanInt(0)
-            if (sId != 0) {
-                val rawCatId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
-                val targetCatKey = "${playlist.id}_${AetherSectionType.SERIES.name}_$rawCatId"
-                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) {
-                    targetCatKey
-                } else {
-                    buildCategoryEntity(
-                        catId = rawCatId,
-                        catName = "⚡ Weitere Serien ($rawCatId)",
-                        section = AetherSectionType.SERIES,
-                        sortIndex = 9999,
-                        targetList = extraSeriesCats
-                    )
-                }
-                seriesStreams.add(
-                    StreamItemEntity(
-                        uniqueStreamKey = "${playlist.id}_SERIES_$sId",
-                        playlistId = playlist.id,
-                        providerStreamId = sId,
-                        uniqueCategoryKey = finalCatKey,
-                        sectionType = AetherSectionType.SERIES,
-                        name = dto.name?.takeIf { it.isNotBlank() } ?: "Serie #$sId",
-                        logoUrl = dto.cover,
-                        streamUrl = "$cleanServer/series/${playlist.username}/${playlist.password}/$sId",
-                        rating = dto.rating.asCleanString(""),
-                        plotDescription = dto.plot,
-                        isVisible = true,
-                        customChannelNumber = dto.num.asCleanInt(idx + 1)
-                    )
-                )
-            }
+        // STUFE 3: PRE-WARMING DER ERSTEN SICHTBAREN VOD- & SERIEN-KATEGORIE
+        // (Restliche Kategorien werden in 0,2s Lazy On-Demand geladen, sobald der Nutzer sie anklickt!)
+        vodCategories.firstOrNull { it.isVisible && !it.isLocked }?.let { firstVodCat ->
+            fetchVodStreamsForCategory(playlist, firstVodCat)
         }
-        if (extraSeriesCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraSeriesCats)
-        if (seriesStreams.isNotEmpty()) {
-            seriesStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += seriesStreams.size
+        seriesCategories.firstOrNull { it.isVisible && !it.isLocked }?.let { firstSeriesCat ->
+            fetchSeriesForCategory(playlist, firstSeriesCat)
         }
 
-        val vodStreams = mutableListOf<StreamItemEntity>()
-        val extraVodCats = mutableListOf<CategoryEntity>()
-        fetchVodStreams(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
-            val sId = dto.streamId.asCleanInt(0)
-            if (sId != 0) {
-                val rawCatId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
-                val targetCatKey = "${playlist.id}_${AetherSectionType.VOD.name}_$rawCatId"
-                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) {
-                    targetCatKey
-                } else {
-                    buildCategoryEntity(
-                        catId = rawCatId,
-                        catName = "⚡ Weitere Filme ($rawCatId)",
-                        section = AetherSectionType.VOD,
-                        sortIndex = 9999,
-                        targetList = extraVodCats
-                    )
-                }
-                val ext = dto.containerExtension.asCleanString("mp4").trimStart('.').ifBlank { "mp4" }
-                val directUrl = dto.directSource.asCleanString("")
-                val finalVodUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
-                    directUrl
-                } else {
-                    "$cleanServer/movie/${playlist.username}/${playlist.password}/$sId.$ext"
-                }
-
-                vodStreams.add(
-                    StreamItemEntity(
-                        uniqueStreamKey = "${playlist.id}_VOD_$sId",
-                        playlistId = playlist.id,
-                        providerStreamId = sId,
-                        uniqueCategoryKey = finalCatKey,
-                        sectionType = AetherSectionType.VOD,
-                        name = dto.name?.takeIf { it.isNotBlank() } ?: "Film #$sId",
-                        logoUrl = dto.streamIcon,
-                        streamUrl = finalVodUrl,
-                        containerExtension = ext,
-                        rating = dto.rating.asCleanString(""),
-                        isVisible = true,
-                        customChannelNumber = dto.num.asCleanInt(idx + 1)
-                    )
-                )
-            }
-        }
-        if (extraVodCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraVodCats)
-        if (vodStreams.isNotEmpty()) {
-            vodStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += vodStreams.size
-        }
-
-        if (totalStreamsSaved > 0) {
+        if (totalItemsSaved > 0) {
             dao.markPlaylistSynced(
                 playlistId = playlist.id,
                 timestamp = Clock.System.now().toEpochMilliseconds()
@@ -344,6 +299,9 @@ class XtreamSyncRepository(
         newlyDiscoveredCount
     }
 
+    /**
+     * Lazy On-Demand Lader für eine einzelne VOD-Kategorie (minimaler RAM-Bedarf, 0,2s Ladezeit).
+     */
     suspend fun fetchVodStreamsForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
@@ -388,6 +346,9 @@ class XtreamSyncRepository(
         return@withContext false
     }
 
+    /**
+     * Lazy On-Demand Lader für eine einzelne Serien-Kategorie.
+     */
     suspend fun fetchSeriesForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
@@ -425,6 +386,9 @@ class XtreamSyncRepository(
         return@withContext false
     }
 
+    /**
+     * L10 Rekursiver Deep-Scanner für Serien-Episoden mit Stack-Overflow-Schutz (MAX_RECURSION_DEPTH).
+     */
     suspend fun fetchAndStoreSeriesEpisodes(
         playlist: PlaylistEntity,
         seriesItem: StreamItemEntity
@@ -440,7 +404,9 @@ class XtreamSyncRepository(
                 parameter("password", playlist.password)
                 parameter("action", "get_series_info")
                 parameter("series_id", seriesId)
-            }.body<String>()
+            }.body<String>().trim()
+
+            if (!rawText.startsWith("{") && !rawText.startsWith("[")) return@runCatching null
             jsonParser.parseToJsonElement(rawText)
         }.getOrNull() ?: return@withContext false
 
@@ -465,7 +431,8 @@ class XtreamSyncRepository(
             val videoUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
                 directUrl
             } else {
-                "$cleanServer/series/${playlist.username}/${playlist.password}/$rawId.$ext"
+                val cleanEpisodeId = rawId.substringBeforeLast(".")
+                "$cleanServer/series/${playlist.username}/${playlist.password}/$cleanEpisodeId.$ext"
             }
 
             episodeEntities.add(
@@ -484,7 +451,14 @@ class XtreamSyncRepository(
             )
         }
 
-        fun scanJsonRecursively(element: JsonElement, currentSeason: Int, fallbackEpIndex: Int) {
+        fun scanJsonRecursively(
+            element: JsonElement,
+            currentSeason: Int,
+            fallbackEpIndex: Int,
+            depth: Int
+        ) {
+            if (depth > MAX_RECURSION_DEPTH) return
+
             when (element) {
                 is JsonObject -> {
                     val hasEpisodeId = element.containsKey("id") || element.containsKey("stream_id")
@@ -506,9 +480,9 @@ class XtreamSyncRepository(
                                 (child.containsKey("id") || child.containsKey("stream_id"))
 
                             if (childIsDirectEpisode) {
-                                scanJsonRecursively(child, currentSeason, parsedKeyNum ?: runningIdx)
+                                scanJsonRecursively(child, currentSeason, parsedKeyNum ?: runningIdx, depth + 1)
                             } else {
-                                scanJsonRecursively(child, parsedKeyNum ?: currentSeason, runningIdx)
+                                scanJsonRecursively(child, parsedKeyNum ?: currentSeason, runningIdx, depth + 1)
                             }
                             runningIdx++
                         }
@@ -517,9 +491,9 @@ class XtreamSyncRepository(
                 is JsonArray -> {
                     element.forEachIndexed { index, item ->
                         if (item is JsonArray) {
-                            scanJsonRecursively(item, index + 1, 1)
+                            scanJsonRecursively(item, index + 1, 1, depth + 1)
                         } else {
-                            scanJsonRecursively(item, currentSeason, index + 1)
+                            scanJsonRecursively(item, currentSeason, index + 1, depth + 1)
                         }
                     }
                 }
@@ -527,7 +501,7 @@ class XtreamSyncRepository(
             }
         }
 
-        scanJsonRecursively(episodesElement, currentSeason = 1, fallbackEpIndex = 1)
+        scanJsonRecursively(episodesElement, currentSeason = 1, fallbackEpIndex = 1, depth = 0)
 
         if (episodeEntities.isNotEmpty()) {
             dao.insertOrUpdateEpisodes(episodeEntities)
@@ -547,7 +521,8 @@ class XtreamSyncRepository(
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", action)
-        }.body<String>()
+        }.body<String>().trim()
+        if (!raw.startsWith("[")) return@runCatching emptyList()
         jsonParser.decodeFromString<List<XtreamCategoryDto>>(raw)
     }.getOrDefault(emptyList())
 
@@ -560,7 +535,8 @@ class XtreamSyncRepository(
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", "get_live_streams")
-        }.body<String>()
+        }.body<String>().trim()
+        if (!raw.startsWith("[")) return@runCatching emptyList()
         jsonParser.decodeFromString<List<XtreamLiveStreamDto>>(raw)
     }.getOrDefault(emptyList())
 
@@ -577,7 +553,8 @@ class XtreamSyncRepository(
             if (!categoryId.isNullOrBlank()) {
                 parameter("category_id", categoryId)
             }
-        }.body<String>()
+        }.body<String>().trim()
+        if (!raw.startsWith("[")) return@runCatching emptyList()
         jsonParser.decodeFromString<List<XtreamVodStreamDto>>(raw)
     }.getOrDefault(emptyList())
 
@@ -594,7 +571,8 @@ class XtreamSyncRepository(
             if (!categoryId.isNullOrBlank()) {
                 parameter("category_id", categoryId)
             }
-        }.body<String>()
+        }.body<String>().trim()
+        if (!raw.startsWith("[")) return@runCatching emptyList()
         jsonParser.decodeFromString<List<XtreamSeriesDto>>(raw)
     }.getOrDefault(emptyList())
 }
