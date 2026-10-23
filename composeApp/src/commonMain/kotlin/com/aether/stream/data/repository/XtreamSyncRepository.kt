@@ -4,6 +4,7 @@ import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.CategoryEntity
 import com.aether.stream.data.local.PlaylistEntity
+import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -20,9 +21,13 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
 
 @Serializable
@@ -63,6 +68,23 @@ data class XtreamSeriesDto(
     @SerialName("category_id") val categoryId: JsonElement? = null
 )
 
+@Serializable
+data class XtreamEpisodeDto(
+    @SerialName("id") val id: JsonElement? = null,
+    @SerialName("episode_num") val episodeNum: JsonElement? = null,
+    @SerialName("title") val title: String? = null,
+    @SerialName("container_extension") val containerExtension: String? = "mp4",
+    @SerialName("info") val info: XtreamEpisodeInfoDto? = null
+)
+
+@Serializable
+data class XtreamEpisodeInfoDto(
+    @SerialName("plot") val plot: String? = null,
+    @SerialName("duration_secs") val durationSecs: JsonElement? = null,
+    @SerialName("duration") val duration: String? = null,
+    @SerialName("rating") val rating: JsonElement? = null
+)
+
 private fun JsonElement?.asCleanString(default: String = ""): String =
     (this as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: default
 
@@ -79,6 +101,11 @@ class XtreamSyncRepository(
     companion object {
         private const val ORPHAN_CATEGORY_ID = "AETHER_UNCATEGORIZED_FEEDS"
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
+        private val jsonParser = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            coerceInputValues = true
+        }
     }
 
     suspend fun triggerDailySilentSyncIfNeeded(): Int = withContext(Dispatchers.IO) {
@@ -289,6 +316,75 @@ class XtreamSyncRepository(
 
             newlyDiscoveredCount
         }
+    }
+
+    /**
+     * Phase 2: Lädt alle Staffeln und Episoden einer Serie on demand herunter
+     * und speichert sie in der Room-Tabelle 'series_episodes'.
+     */
+    suspend fun fetchAndStoreSeriesEpisodes(
+        playlist: PlaylistEntity,
+        seriesItem: StreamItemEntity
+    ): Boolean = withContext(Dispatchers.IO) {
+        val baseUrl = playlist.serverUrl.trimEnd('/')
+        val apiEndpoint = "$baseUrl/player_api.php"
+        val seriesId = seriesItem.providerStreamId
+
+        val rootElement = runCatching {
+            httpClient.get(apiEndpoint) {
+                header("User-Agent", IPTV_USER_AGENT)
+                parameter("username", playlist.username)
+                parameter("password", playlist.password)
+                parameter("action", "get_series_info")
+                parameter("series_id", seriesId)
+            }.body<JsonElement>()
+        }.getOrNull() ?: return@withContext false
+
+        val episodesElement = (rootElement as? JsonObject)?.get("episodes") ?: return@withContext false
+        val episodesObj = episodesElement as? JsonObject ?: return@withContext false
+
+        val episodeEntities = mutableListOf<SeriesEpisodeEntity>()
+
+        episodesObj.forEach { (seasonKey, seasonEpisodesArray) ->
+            val seasonNum = seasonKey.toIntOrNull() ?: 1
+            if (seasonEpisodesArray is JsonArray) {
+                val dtos = runCatching {
+                    jsonParser.decodeFromJsonElement<List<XtreamEpisodeDto>>(seasonEpisodesArray)
+                }.getOrDefault(emptyList())
+
+                dtos.forEach { epDto ->
+                    val epId = epDto.id.asCleanString("")
+                    val epNum = epDto.episodeNum.asCleanInt(1)
+                    if (epId.isNotEmpty()) {
+                        val durationSeconds = epDto.info?.durationSecs.asCleanInt(0).toLong()
+                        val ext = epDto.containerExtension?.takeIf { it.isNotBlank() } ?: "mp4"
+                        val videoUrl = "$baseUrl/series/${playlist.username}/${playlist.password}/$epId.$ext"
+
+                        episodeEntities.add(
+                            SeriesEpisodeEntity(
+                                uniqueEpisodeKey = "${seriesItem.uniqueStreamKey}_s${seasonNum}_e${epNum}",
+                                seriesStreamKey = seriesItem.uniqueStreamKey,
+                                seasonNumber = seasonNum,
+                                episodeNumber = epNum,
+                                title = epDto.title?.takeIf { it.isNotBlank() } ?: "Episode $epNum",
+                                containerExtension = ext,
+                                plotDescription = epDto.info?.plot,
+                                durationMs = durationSeconds * 1000L,
+                                streamUrl = videoUrl,
+                                rating = epDto.info?.rating.asCleanString("")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        if (episodeEntities.isNotEmpty()) {
+            dao.insertOrUpdateEpisodes(episodeEntities)
+            return@withContext true
+        }
+
+        return@withContext false
     }
 
     private suspend fun fetchCategories(
