@@ -41,6 +41,7 @@ import com.aether.stream.core.navigation.LiveTvLayoutMode
 import com.aether.stream.core.navigation.StreamBufferPreset
 import com.aether.stream.core.theme.AetherColors
 import com.aether.stream.core.ui.AetherFocusableGlassCard
+import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.CategoryEntity
 import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
@@ -69,10 +70,14 @@ fun LiveTvDualCockpitScreen(
     streamsInCategory: List<StreamItemEntity>,
     currentPlayingStream: StreamItemEntity?,
     currentChannelEpg: List<EpgProgramEntity>,
+    activeSection: AetherSectionType = AetherSectionType.LIVE,
+    onSelectSection: (AetherSectionType) -> Unit = {},
     onSelectCategory: (String) -> Unit,
     onSelectStream: (StreamItemEntity) -> Unit,
     onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
     onOpenFavoriteFolderDialog: (StreamItemEntity) -> Unit,
+    onOpenSettings: () -> Unit = {},
+    onOpenSearch: () -> Unit = {},
     onToggleLayoutMode: () -> Unit,
     onCycleBufferPreset: () -> Unit,
     onZapChannelOffset: (Int) -> Unit,
@@ -84,7 +89,7 @@ fun LiveTvDualCockpitScreen(
     var isFullscreenHudVisible by remember { mutableStateOf(true) }
     var hudActivityTick by remember { mutableStateOf(0) }
     var isTrackSelectorVisible by remember { mutableStateOf(false) }
-    var isTiviMateOverlayVisible by remember { mutableStateOf(true) }
+    var focusedStreamItem by remember { mutableStateOf<StreamItemEntity?>(null) }
 
     val techSpecs by playerEngine.techMetadata.collectAsState()
     val audioTracks by playerEngine.audioTracks.collectAsState()
@@ -93,18 +98,16 @@ fun LiveTvDualCockpitScreen(
     val durationMs by playerEngine.durationMs.collectAsState()
     val isPlaying by playerEngine.isPlaying.collectAsState()
 
-    val isPureFullscreenActive = isExpandedToPureFullscreen ||
-        (layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD && !isTiviMateOverlayVisible)
+    val displayStream = focusedStreamItem ?: currentPlayingStream ?: streamsInCategory.firstOrNull()
 
-    // Automatisches Ausblenden des Vollbild-HUDs nach 4,5 Sekunden für 100% freies Videobild!
-    LaunchedEffect(isPureFullscreenActive, isFullscreenHudVisible, hudActivityTick, isTrackSelectorVisible) {
-        if (isPureFullscreenActive && isFullscreenHudVisible && !isTrackSelectorVisible) {
+    LaunchedEffect(isExpandedToPureFullscreen, isFullscreenHudVisible, hudActivityTick, isTrackSelectorVisible) {
+        if (isExpandedToPureFullscreen && isFullscreenHudVisible && !isTrackSelectorVisible) {
             delay(4500L)
             isFullscreenHudVisible = false
         }
     }
 
-    val handleChannelClick: (StreamItemEntity) -> Unit = { clickedStream ->
+    val handleItemClick: (StreamItemEntity) -> Unit = { clickedStream ->
         if (currentPlayingStream?.uniqueStreamKey == clickedStream.uniqueStreamKey) {
             isExpandedToPureFullscreen = true
             isFullscreenHudVisible = true
@@ -120,7 +123,7 @@ fun LiveTvDualCockpitScreen(
             .fillMaxSize()
             .background(AetherColors.ObsidianBlack)
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && isPureFullscreenActive) {
+                if (event.type == KeyEventType.KeyUp && isExpandedToPureFullscreen) {
                     hudActivityTick++
                     when (event.key) {
                         Key.DirectionCenter, Key.Enter -> {
@@ -148,17 +151,11 @@ fun LiveTvDualCockpitScreen(
                                 onZapChannelOffset(-1)
                                 isFullscreenHudVisible = true
                                 true
-                            } else if (!isFullscreenHudVisible) {
-                                isFullscreenHudVisible = true
-                                true
                             } else false
                         }
                         Key.DirectionDown, Key.ChannelDown -> {
                             if (!isVodOrSeriesMode) {
                                 onZapChannelOffset(1)
-                                isFullscreenHudVisible = true
-                                true
-                            } else if (!isFullscreenHudVisible) {
                                 isFullscreenHudVisible = true
                                 true
                             } else false
@@ -170,333 +167,286 @@ fun LiveTvDualCockpitScreen(
                             } else if (isVodOrSeriesMode) {
                                 onBackToDashboard()
                                 true
-                            } else if (isExpandedToPureFullscreen) {
-                                isExpandedToPureFullscreen = false
-                                true
                             } else {
-                                isTiviMateOverlayVisible = true
+                                isExpandedToPureFullscreen = false
                                 true
                             }
                         }
                         else -> false
                     }
-                } else {
-                    false
-                }
+                } else false
             }
     ) {
-        when {
-            isPureFullscreenActive -> {
-                AetherVideoSurface(
-                    engine = playerEngine,
-                    modifier = Modifier.fillMaxSize()
-                )
+        if (isExpandedToPureFullscreen) {
+            AetherVideoSurface(
+                engine = playerEngine,
+                modifier = Modifier.fillMaxSize()
+            )
 
-                if (isFullscreenHudVisible) {
-                    FullscreenPlayerHudOverlay(
-                        stream = currentPlayingStream,
-                        techSpecs = techSpecs,
-                        currentBufferPreset = currentBufferPreset,
-                        audioTracks = audioTracks,
-                        subtitleTracks = subtitleTracks,
-                        isTrackSelectorOpen = isTrackSelectorVisible,
-                        isVodOrSeriesMode = isVodOrSeriesMode,
-                        isPlaying = isPlaying,
-                        currentPositionMs = currentPosMs,
-                        durationMs = durationMs,
-                        onTogglePlayPause = {
-                            hudActivityTick++
-                            if (isPlaying) playerEngine.pause() else playerEngine.resume()
-                        },
-                        onSeekRelative = { offsetMs ->
-                            hudActivityTick++
-                            playerEngine.seekRelativeMs(offsetMs)
-                        },
-                        onToggleTrackSelector = {
-                            hudActivityTick++
-                            isTrackSelectorVisible = !isTrackSelectorVisible
-                        },
-                        onSelectAudio = {
-                            hudActivityTick++
-                            playerEngine.selectAudioTrack(it)
-                        },
-                        onSelectSubtitle = {
-                            hudActivityTick++
-                            playerEngine.selectSubtitleTrack(it)
-                        },
-                        onCycleBuffer = {
-                            hudActivityTick++
-                            onCycleBufferPreset()
-                        },
-                        onZapPrevious = {
-                            hudActivityTick++
-                            onZapChannelOffset(-1)
-                        },
-                        onZapNext = {
-                            hudActivityTick++
-                            onZapChannelOffset(1)
-                        },
-                        onExitFullscreen = {
-                            if (isVodOrSeriesMode) {
-                                onBackToDashboard()
-                            } else {
-                                isExpandedToPureFullscreen = false
-                                isTiviMateOverlayVisible = true
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.BottomCenter)
-                    )
-                }
+            if (isFullscreenHudVisible) {
+                FullscreenPlayerHudOverlay(
+                    stream = currentPlayingStream,
+                    techSpecs = techSpecs,
+                    currentBufferPreset = currentBufferPreset,
+                    audioTracks = audioTracks,
+                    subtitleTracks = subtitleTracks,
+                    isTrackSelectorOpen = isTrackSelectorVisible,
+                    isVodOrSeriesMode = isVodOrSeriesMode,
+                    isPlaying = isPlaying,
+                    currentPositionMs = currentPosMs,
+                    durationMs = durationMs,
+                    onTogglePlayPause = {
+                        hudActivityTick++
+                        if (isPlaying) playerEngine.pause() else playerEngine.resume()
+                    },
+                    onSeekRelative = { offsetMs ->
+                        hudActivityTick++
+                        playerEngine.seekRelativeMs(offsetMs)
+                    },
+                    onToggleTrackSelector = {
+                        hudActivityTick++
+                        isTrackSelectorVisible = !isTrackSelectorVisible
+                    },
+                    onSelectAudio = {
+                        hudActivityTick++
+                        playerEngine.selectAudioTrack(it)
+                    },
+                    onSelectSubtitle = {
+                        hudActivityTick++
+                        playerEngine.selectSubtitleTrack(it)
+                    },
+                    onCycleBuffer = {
+                        hudActivityTick++
+                        onCycleBufferPreset()
+                    },
+                    onZapPrevious = {
+                        hudActivityTick++
+                        onZapChannelOffset(-1)
+                    },
+                    onZapNext = {
+                        hudActivityTick++
+                        onZapChannelOffset(1)
+                    },
+                    onExitFullscreen = {
+                        if (isVodOrSeriesMode) {
+                            onBackToDashboard()
+                        } else {
+                            isExpandedToPureFullscreen = false
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
             }
-
-            layoutMode == LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD -> {
-                AetherVideoSurface(
-                    engine = playerEngine,
-                    modifier = Modifier.fillMaxSize()
+        } else {
+            // ============================================================
+            // DAS NEUE TIVIMATE-HAUPTBILDSCHIRM-LAYOUT (1:1 NACH SCREENSHOT)
+            // ============================================================
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // SPALTE 1: Die schmale TiviMate-Icon-Seitenleiste (ganz links)
+                TiviMateNavigationRail(
+                    activeSection = activeSection,
+                    onSelectSection = onSelectSection,
+                    onOpenSearch = onOpenSearch,
+                    onOpenSettings = onOpenSettings
                 )
 
+                // SPALTE 2: Die Kategorien / Gruppen
+                TiviMateCategoryColumn(
+                    categories = categories,
+                    favoriteFolders = favoriteFolders,
+                    selectedCategoryKey = selectedCategoryKey,
+                    onSelectCategory = onSelectCategory,
+                    modifier = Modifier
+                        .width(240.dp)
+                        .fillMaxHeight()
+                )
+
+                // RECHTER BEREICH: Zweigeteilt (Oben Bühne / Unten Liste)
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(AetherColors.ObsidianBlack.copy(alpha = 0.65f))
-                        .padding(24.dp)
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    LiveTvTopBar(
-                        layoutMode = layoutMode,
-                        techSpecs = techSpecs,
-                        currentBufferPreset = currentBufferPreset,
-                        onToggleLayoutMode = onToggleLayoutMode,
-                        onCycleBufferPreset = onCycleBufferPreset,
-                        onBackToDashboard = onBackToDashboard
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
+                    // OBERER BLOCK: Mini-Player (links) + Programm-Info (rechts daneben)
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(200.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        CategoryColumnList(
-                            categories = categories,
-                            favoriteFolders = favoriteFolders,
-                            selectedCategoryKey = selectedCategoryKey,
-                            onSelectCategory = onSelectCategory,
-                            modifier = Modifier
-                                .width(270.dp)
-                                .fillMaxHeight()
-                        )
-
-                        ChannelColumnList(
-                            streams = streamsInCategory,
-                            currentPlayingStream = currentPlayingStream,
-                            onChannelClick = { stream ->
-                                if (currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey) {
-                                    isTiviMateOverlayVisible = false
+                        // 16:9 Mini-Player Vorschaufenster
+                        AetherFocusableGlassCard(
+                            onClick = {
+                                if (currentPlayingStream != null) {
+                                    isExpandedToPureFullscreen = true
                                     isFullscreenHudVisible = true
                                     hudActivityTick++
-                                } else {
-                                    onSelectStream(stream)
-                                    playerEngine.playStream(stream.streamUrl)
                                 }
                             },
-                            onQuickFavoriteToggle = onQuickFavoriteToggle,
-                            onLongPressFavoriteFolder = onOpenFavoriteFolderDialog,
+                            cornerRadius = 14.dp,
                             modifier = Modifier
-                                .width(380.dp)
-                                .fillMaxHeight()
-                        )
-
-                        EpgProgramListPanel(
-                            epgList = currentChannelEpg,
-                            currentStream = currentPlayingStream,
-                            onExpandFullscreen = {
-                                isTiviMateOverlayVisible = false
-                                isFullscreenHudVisible = true
-                                hudActivityTick++
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                        )
-                    }
-                }
-            }
-
-            else -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp)
-                ) {
-                    LiveTvTopBar(
-                        layoutMode = layoutMode,
-                        techSpecs = techSpecs,
-                        currentBufferPreset = currentBufferPreset,
-                        onToggleLayoutMode = onToggleLayoutMode,
-                        onCycleBufferPreset = onCycleBufferPreset,
-                        onBackToDashboard = onBackToDashboard
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        CategoryColumnList(
-                            categories = categories,
-                            favoriteFolders = favoriteFolders,
-                            selectedCategoryKey = selectedCategoryKey,
-                            onSelectCategory = onSelectCategory,
-                            modifier = Modifier
-                                .width(260.dp)
-                                .fillMaxHeight()
-                        )
-
-                        ChannelColumnList(
-                            streams = streamsInCategory,
-                            currentPlayingStream = currentPlayingStream,
-                            onChannelClick = handleChannelClick,
-                            onQuickFavoriteToggle = onQuickFavoriteToggle,
-                            onLongPressFavoriteFolder = onOpenFavoriteFolderDialog,
-                            modifier = Modifier
-                                .width(360.dp)
-                                .fillMaxHeight()
-                        )
-
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            modifier = Modifier
-                                .weight(1f)
+                                .width(355.dp)
                                 .fillMaxHeight()
                         ) {
-                            AetherFocusableGlassCard(
-                                onClick = {
-                                    isExpandedToPureFullscreen = true
-                                    isFullscreenHudVisible = true
-                                    hudActivityTick++
-                                },
-                                cornerRadius = 18.dp,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(16f / 9f)
-                            ) {
-                                Box(modifier = Modifier.fillMaxSize()) {
-                                    AetherVideoSurface(
-                                        engine = playerEngine,
-                                        modifier = Modifier.fillMaxSize()
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                AetherVideoSurface(
+                                    engine = playerEngine,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(8.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(AetherColors.ObsidianBlack.copy(alpha = 0.85f))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "⛶ 1x OK für Vollbild",
+                                        style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
                                     )
-
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .padding(10.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(AetherColors.ObsidianBlack.copy(alpha = 0.8f))
-                                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "${techSpecs.resolutionLabel} • ${techSpecs.fpsLabel} • ${techSpecs.audioCodec}",
-                                            style = MaterialTheme.typography.labelSmall
-                                        )
-                                    }
-
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.BottomStart)
-                                            .padding(10.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(AetherColors.ObsidianBlack.copy(alpha = 0.8f))
-                                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "⛶ Noch 1x OK für Vollbild",
-                                            style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
-                                        )
-                                    }
                                 }
                             }
-
-                            EpgProgramListPanel(
-                                epgList = currentChannelEpg,
-                                currentStream = currentPlayingStream,
-                                onExpandFullscreen = {
-                                    isExpandedToPureFullscreen = true
-                                    isFullscreenHudVisible = true
-                                    hudActivityTick++
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                            )
                         }
+
+                        // Programm-Info / Details zum ausgewählten Element
+                        TiviMateDetailsPanel(
+                            stream = displayStream,
+                            techSpecs = techSpecs,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        )
                     }
+
+                    // UNTERER BLOCK: Die nummerierte Kanalliste / Medienliste
+                    TiviMateMediaListPanel(
+                        streams = streamsInCategory,
+                        currentPlayingStream = currentPlayingStream,
+                        focusedStreamItem = focusedStreamItem,
+                        onFocusStream = { focusedStreamItem = it },
+                        onStreamClick = handleItemClick,
+                        onQuickFavoriteToggle = onQuickFavoriteToggle,
+                        onLongPressFavoriteFolder = onOpenFavoriteFolderDialog,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * TiviMate-Seitenleiste (Spalte 1):
+ * Such-Icon, TV, Filme, Serien, Favoriten, Settings
+ */
 @Composable
-private fun LiveTvTopBar(
-    layoutMode: LiveTvLayoutMode,
-    techSpecs: StreamTechMetadata,
-    currentBufferPreset: StreamBufferPreset,
-    onToggleLayoutMode: () -> Unit,
-    onCycleBufferPreset: () -> Unit,
-    onBackToDashboard: () -> Unit
+private fun TiviMateNavigationRail(
+    activeSection: AetherSectionType,
+    onSelectSection: (AetherSectionType) -> Unit,
+    onOpenSearch: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    Row(
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .width(68.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(16.dp))
+            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.90f))
+            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .padding(vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            AetherFocusableGlassCard(onClick = onBackToDashboard, cornerRadius = 10.dp) {
+            // AETHER Logo
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .padding(bottom = 6.dp)
+            ) {
                 Text(
-                    text = "◄ DASHBOARD",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    text = "AETH",
+                    style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
                 )
             }
-            Text(
-                text = "AETHER LIVE TV",
-                style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.CyberCyan)
+
+            // Suche
+            TiviMateNavIcon(
+                icon = "🔍",
+                isSelected = false,
+                onClick = onOpenSearch
+            )
+
+            // TV
+            TiviMateNavIcon(
+                icon = "📺",
+                isSelected = activeSection == AetherSectionType.LIVE,
+                onClick = { onSelectSection(AetherSectionType.LIVE) }
+            )
+
+            // Filme (VOD)
+            TiviMateNavIcon(
+                icon = "🎬",
+                isSelected = activeSection == AetherSectionType.VOD,
+                onClick = { onSelectSection(AetherSectionType.VOD) }
+            )
+
+            // Serien
+            TiviMateNavIcon(
+                icon = "🍿",
+                isSelected = activeSection == AetherSectionType.SERIES,
+                onClick = { onSelectSection(AetherSectionType.SERIES) }
             )
         }
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AetherFocusableGlassCard(onClick = onCycleBufferPreset, cornerRadius = 10.dp) {
-                Text(
-                    text = "🛡️ Puffer: ${currentBufferPreset.title}",
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
-
-            AetherFocusableGlassCard(onClick = onToggleLayoutMode, cornerRadius = 10.dp) {
-                val modeText = when (layoutMode) {
-                    LiveTvLayoutMode.IBO_COCKPIT_3_COLUMN -> "⊞ ANSICHT: IBO 3-SPALTEN (Wechseln zu TiviMate)"
-                    LiveTvLayoutMode.TIVIMATE_FULLSCREEN_HUD -> "📺 ANSICHT: TIVIMATE HUD (Wechseln zu IBO)"
-                }
-                Text(
-                    text = modeText,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
-        }
+        // Settings (Zahnrad ganz unten)
+        TiviMateNavIcon(
+            icon = "⚙️",
+            isSelected = false,
+            onClick = onOpenSettings
+        )
     }
 }
 
 @Composable
-private fun CategoryColumnList(
+private fun TiviMateNavIcon(
+    icon: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    AetherFocusableGlassCard(
+        onClick = onClick,
+        isSelected = isSelected,
+        cornerRadius = 12.dp,
+        enableScaleOnFocus = true,
+        modifier = Modifier
+            .width(48.dp)
+            .height(48.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(text = icon, style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+/**
+ * TiviMate Gruppen-Spalte (Spalte 2)
+ */
+@Composable
+private fun TiviMateCategoryColumn(
     categories: List<CategoryEntity>,
     favoriteFolders: List<FavoriteFolderEntity>,
     selectedCategoryKey: String,
@@ -504,24 +454,26 @@ private fun CategoryColumnList(
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(AetherColors.GlassSurface)
-            .padding(12.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
+            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .padding(10.dp)
     ) {
-        item(key = "SYS_RECENT") {
-            CategoryItemButton(
-                title = "🕒 Zuletzt gesehen",
-                isSelected = selectedCategoryKey == "SYS_RECENT",
-                onClick = { onSelectCategory("SYS_RECENT") }
-            )
-        }
-        item(key = "SYS_QUICK_FAV") {
-            CategoryItemButton(
-                title = "⭐ Schnell-Favoriten",
+        item(key = "SYS_FAV") {
+            TiviMateCategoryRow(
+                title = "⭐ Favoriten",
                 isSelected = selectedCategoryKey == "SYS_QUICK_FAV",
                 onClick = { onSelectCategory("SYS_QUICK_FAV") }
+            )
+        }
+
+        item(key = "SYS_RECENT") {
+            TiviMateCategoryRow(
+                title = "🕒 Zuletzt gesehen",
+                isSelected = selectedCategoryKey == "SYS_RECENT" || selectedCategoryKey == "SYS_CONTINUE",
+                onClick = { onSelectCategory("SYS_RECENT") }
             )
         }
 
@@ -530,7 +482,7 @@ private fun CategoryColumnList(
             key = { "FOLDER_${it.folderId}" }
         ) { folder ->
             val key = "FOLDER_${folder.folderId}"
-            CategoryItemButton(
+            TiviMateCategoryRow(
                 title = "📁 ${folder.folderName}",
                 isSelected = selectedCategoryKey == key,
                 onClick = { onSelectCategory(key) }
@@ -541,7 +493,7 @@ private fun CategoryColumnList(
             items = categories,
             key = { it.uniqueCategoryKey }
         ) { category ->
-            CategoryItemButton(
+            TiviMateCategoryRow(
                 title = category.categoryName,
                 isSelected = selectedCategoryKey == category.uniqueCategoryKey,
                 onClick = { onSelectCategory(category.uniqueCategoryKey) }
@@ -551,7 +503,7 @@ private fun CategoryColumnList(
 }
 
 @Composable
-private fun CategoryItemButton(
+private fun TiviMateCategoryRow(
     title: String,
     isSelected: Boolean,
     onClick: () -> Unit
@@ -559,7 +511,7 @@ private fun CategoryItemButton(
     AetherFocusableGlassCard(
         onClick = onClick,
         isSelected = isSelected,
-        cornerRadius = 10.dp,
+        cornerRadius = 8.dp,
         enableScaleOnFocus = false,
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -570,47 +522,142 @@ private fun CategoryItemButton(
             style = MaterialTheme.typography.titleMedium.copy(
                 color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
             ),
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
         )
     }
 }
 
+/**
+ * TiviMate Info-Bühne oben rechts (neben dem Mini-Player)
+ */
 @Composable
-private fun ChannelColumnList(
+private fun TiviMateDetailsPanel(
+    stream: StreamItemEntity?,
+    techSpecs: StreamTechMetadata,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.85f))
+            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(14.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column {
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = stream?.name ?: "Kein Eintrag ausgewählt",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.CyberCyan)
+                )
+
+                Text(
+                    text = "${techSpecs.resolutionLabel} • ${techSpecs.fpsLabel}",
+                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = if (!stream?.rating.isNullOrBlank()) "⭐ Bewertung: ${stream?.rating}" else "Bereit zur Wiedergabe",
+                style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.LaserAmber)
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = stream?.plotDescription
+                    ?: "Drücke 1x OK auf einen Eintrag zum Abspielen im Vorschaufenster oder 2x OK für Vollbild.",
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary)
+            )
+        }
+
+        if (stream?.resumePositionMs ?: 0L > 0L && stream?.totalDurationMs ?: 0L > 0L) {
+            val progress = (stream!!.resumePositionMs.toFloat() / stream.totalDurationMs.toFloat()).coerceIn(0f, 1f)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = formatMillisToTimecode(stream.resumePositionMs),
+                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
+                )
+                LinearProgressIndicator(
+                    progress = { progress },
+                    color = AetherColors.CyberCyan,
+                    trackColor = AetherColors.ObsidianBlack,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                )
+                Text(
+                    text = formatMillisToTimecode(stream.totalDurationMs),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+}
+
+/**
+ * TiviMate Untere Liste (Kanalliste / Filme / Serien)
+ */
+@Composable
+private fun TiviMateMediaListPanel(
     streams: List<StreamItemEntity>,
     currentPlayingStream: StreamItemEntity?,
-    onChannelClick: (StreamItemEntity) -> Unit,
+    focusedStreamItem: StreamItemEntity?,
+    onFocusStream: (StreamItemEntity) -> Unit,
+    onStreamClick: (StreamItemEntity) -> Unit,
     onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
     onLongPressFavoriteFolder: (StreamItemEntity) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(AetherColors.GlassSurface)
-            .padding(12.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
+            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .padding(10.dp)
     ) {
         items(
             items = streams,
             key = { it.uniqueStreamKey }
         ) { stream ->
             val isPlaying = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
+            val isFocused = focusedStreamItem?.uniqueStreamKey == stream.uniqueStreamKey
 
             AetherFocusableGlassCard(
-                onClick = { onChannelClick(stream) },
+                onClick = { onStreamClick(stream) },
                 onLongClick = { onLongPressFavoriteFolder(stream) },
                 isSelected = isPlaying,
-                cornerRadius = 10.dp,
+                cornerRadius = 8.dp,
                 enableScaleOnFocus = false,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                LaunchedEffect(Unit) {
+                    onFocusStream(stream)
+                }
+
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .padding(horizontal = 12.dp, vertical = 9.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -621,6 +668,30 @@ private fun ChannelColumnList(
                             text = "${stream.customChannelNumber}",
                             style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
                         )
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(AetherColors.ObsidianBlack.copy(alpha = 0.7f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = when (stream.sectionType) {
+                                    AetherSectionType.VOD -> "VOD"
+                                    AetherSectionType.SERIES -> "SERIE"
+                                    else -> "TV"
+                                },
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+
+                        if (isPlaying) {
+                            Text(
+                                text = "▶",
+                                style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
+                            )
+                        }
+
                         Text(
                             text = stream.name,
                             maxLines = 1,
@@ -650,76 +721,9 @@ private fun ChannelColumnList(
     }
 }
 
-@Composable
-private fun EpgProgramListPanel(
-    epgList: List<EpgProgramEntity>,
-    currentStream: StreamItemEntity?,
-    onExpandFullscreen: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(AetherColors.GlassSurface)
-            .padding(16.dp)
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = currentStream?.name ?: "Kein Sender ausgewählt",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.CyberCyan)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            AetherFocusableGlassCard(onClick = onExpandFullscreen, cornerRadius = 8.dp) {
-                Text(
-                    text = "⛶ VOLLBILD",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        if (epgList.isEmpty()) {
-            Text(
-                text = "Für diesen Kanal liegen aktuell keine EPG-Programmdaten vor. (Tipp: Halte OK auf einem Sender gedrückt, um ihn einem eigenen Favoriten-Ordner zuzuweisen).",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(epgList) { program ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(AetherColors.ObsidianBlack)
-                            .padding(12.dp)
-                    ) {
-                        Text(
-                            text = program.title,
-                            style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.TextPrimary)
-                        )
-                        if (!program.description.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = program.description,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
+/**
+ * Vollbild-Kino-HUD (Auto-Hide nach 4,5 Sekunden, 1-zeiliger Titel, keine Überlappung)
+ */
 @Composable
 private fun FullscreenPlayerHudOverlay(
     stream: StreamItemEntity?,
@@ -845,14 +849,6 @@ private fun FullscreenPlayerHudOverlay(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
                 }
-                AetherFocusableGlassCard(onClick = { onSeekRelative(60_000L) }, cornerRadius = 10.dp) {
-                    Text(
-                        text = "⏩ +1 Min",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
             } else {
                 AetherFocusableGlassCard(onClick = onZapPrevious, cornerRadius = 10.dp) {
                     Text(
@@ -890,77 +886,11 @@ private fun FullscreenPlayerHudOverlay(
             }
             AetherFocusableGlassCard(onClick = onExitFullscreen, cornerRadius = 10.dp) {
                 Text(
-                    text = if (isVodOrSeriesMode) "◄ ZURÜCK" else "⊞ SENDERLISTE",
+                    text = if (isVodOrSeriesMode) "◄ ZURÜCK" else "⊞ ÜBERSICHT",
                     maxLines = 1,
                     style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
-            }
-        }
-
-        if (isTrackSelectorOpen) {
-            Spacer(modifier = Modifier.height(14.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "VERFÜGBARE AUDIO-SPUREN:", style = MaterialTheme.typography.labelSmall)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    audioTracks.forEach { track ->
-                        AetherFocusableGlassCard(
-                            onClick = { onSelectAudio(track) },
-                            isSelected = track.isSelected,
-                            cornerRadius = 8.dp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "${if (track.isSelected) "● " else "○ "}${track.languageLabel} (${track.codecLabel})",
-                                maxLines = 1,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "UNTERTITEL:", style = MaterialTheme.typography.labelSmall)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    AetherFocusableGlassCard(
-                        onClick = { onSelectSubtitle(null) },
-                        cornerRadius = 8.dp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                    ) {
-                        Text(
-                            text = "Untertitel deaktivieren",
-                            maxLines = 1,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
-                    }
-                    subtitleTracks.forEach { sub ->
-                        AetherFocusableGlassCard(
-                            onClick = { onSelectSubtitle(sub) },
-                            isSelected = sub.isSelected,
-                            cornerRadius = 8.dp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "${if (sub.isSelected) "● " else "○ "}${sub.languageLabel}",
-                                maxLines = 1,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                }
             }
         }
     }
