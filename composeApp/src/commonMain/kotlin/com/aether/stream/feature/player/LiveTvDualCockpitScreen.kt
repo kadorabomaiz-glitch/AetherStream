@@ -1,4 +1,4 @@
-package com.aether.stream.feature.player
+package com.aether.stream
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,8 +14,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,850 +27,522 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.aether.stream.core.navigation.LiveTvLayoutMode
+import androidx.compose.ui.window.Dialog
+import com.aether.stream.core.navigation.AetherNavigationViewModel
+import com.aether.stream.core.navigation.AetherScreen
 import com.aether.stream.core.navigation.StreamBufferPreset
+import com.aether.stream.core.platform.EnforceLandscapeCockpitMode
 import com.aether.stream.core.theme.AetherColors
 import com.aether.stream.core.ui.AetherFocusableGlassCard
+import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.CategoryEntity
-import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
+import com.aether.stream.data.local.FavoriteFolderMappingEntity
+import com.aether.stream.data.local.PlaylistEntity
+import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
+import com.aether.stream.feature.dashboard.DashboardAndFilterViewModel
+import com.aether.stream.feature.gatekeeper.GatekeeperLockScreen
+import com.aether.stream.feature.gatekeeper.GatekeeperViewModel
+import com.aether.stream.feature.gatekeeper.SecretAdminPanelModal
+import com.aether.stream.feature.player.AetherVideoPlayerEngine
+import com.aether.stream.feature.player.LiveTvDualCockpitScreen
+import com.aether.stream.feature.vod.CombinedFavoriteFolderModal
+import com.aether.stream.feature.vod.XtreamPlaylistSetupScreen
 import kotlinx.coroutines.delay
-
-private fun formatMillisToTimecode(millis: Long): String {
-    if (millis <= 0L) return "00:00"
-    val totalSeconds = millis / 1000L
-    val hours = totalSeconds / 3600L
-    val minutes = (totalSeconds % 3600L) / 60L
-    val seconds = totalSeconds % 60L
-    val minStr = minutes.toString().padStart(2, '0')
-    val secStr = seconds.toString().padStart(2, '0')
-    return if (hours > 0L) "$hours:$minStr:$secStr" else "$minStr:$secStr"
-}
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.datetime.Clock
 
 @Composable
-fun LiveTvDualCockpitScreen(
+fun AetherApp(
+    dao: AetherDao,
     playerEngine: AetherVideoPlayerEngine,
-    layoutMode: LiveTvLayoutMode,
-    currentBufferPreset: StreamBufferPreset,
-    categories: List<CategoryEntity>,
-    favoriteFolders: List<FavoriteFolderEntity>,
-    selectedCategoryKey: String,
-    streamsInCategory: List<StreamItemEntity>,
-    currentPlayingStream: StreamItemEntity?,
-    currentChannelEpg: List<EpgProgramEntity>,
-    activeSection: AetherSectionType = AetherSectionType.LIVE,
-    onSelectSection: (AetherSectionType) -> Unit = {},
-    onSelectCategory: (String) -> Unit,
-    onSelectStream: (StreamItemEntity) -> Unit,
-    onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
-    onOpenFavoriteFolderDialog: (StreamItemEntity) -> Unit,
-    onOpenSettings: () -> Unit = {},
-    onOpenSearch: () -> Unit = {},
-    onToggleLayoutMode: () -> Unit,
-    onCycleBufferPreset: () -> Unit,
-    onZapChannelOffset: (Int) -> Unit,
-    onBackToDashboard: () -> Unit,
-    startInPureFullscreen: Boolean = false,
-    isVodOrSeriesMode: Boolean = false
+    navigationViewModel: AetherNavigationViewModel,
+    gatekeeperViewModel: GatekeeperViewModel,
+    dashboardViewModel: DashboardAndFilterViewModel
 ) {
-    var isExpandedToPureFullscreen by remember(startInPureFullscreen) { mutableStateOf(startInPureFullscreen) }
-    var isFullscreenHudVisible by remember { mutableStateOf(true) }
-    var hudActivityTick by remember { mutableStateOf(0) }
-    var isTrackSelectorVisible by remember { mutableStateOf(false) }
-    var focusedStreamItem by remember { mutableStateOf<StreamItemEntity?>(null) }
+    EnforceLandscapeCockpitMode()
 
-    val techSpecs by playerEngine.techMetadata.collectAsState()
-    val audioTracks by playerEngine.audioTracks.collectAsState()
-    val subtitleTracks by playerEngine.subtitleTracks.collectAsState()
-    val currentPosMs by playerEngine.currentPositionMs.collectAsState()
-    val durationMs by playerEngine.durationMs.collectAsState()
-    val isPlaying by playerEngine.isPlaying.collectAsState()
+    val navState by navigationViewModel.uiState.collectAsState()
+    val activePlaylist by dashboardViewModel.activePlaylist.collectAsState()
+    val scope = rememberCoroutineScope()
 
-    val displayStream = focusedStreamItem ?: currentPlayingStream ?: streamsInCategory.firstOrNull()
+    var selectedSection by remember { mutableStateOf(AetherSectionType.LIVE) }
+    var selectedCategoryKey by remember { mutableStateOf("") }
+    var currentPlayingStream by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var currentPlayingEpisode by remember { mutableStateOf<SeriesEpisodeEntity?>(null) }
+    var activeSeriesForModal by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var isCinemaPlayerActive by remember { mutableStateOf(false) }
+    var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
 
-    LaunchedEffect(isExpandedToPureFullscreen, isFullscreenHudVisible, hudActivityTick, isTrackSelectorVisible) {
-        if (isExpandedToPureFullscreen && isFullscreenHudVisible && !isTrackSelectorVisible) {
-            delay(4500L)
-            isFullscreenHudVisible = false
+    val playlistId = activePlaylist?.id ?: 0L
+
+    val favoriteFolders by remember(playlistId) {
+        if (playlistId > 0L) dao.observeFavoriteFolders(playlistId) else flowOf(emptyList())
+    }.collectAsState(initial = emptyList())
+
+    val visibleCategories by remember(playlistId, selectedSection) {
+        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection)
+        else flowOf(emptyList())
+    }.collectAsState(initial = emptyList())
+
+    LaunchedEffect(visibleCategories, selectedSection) {
+        if (visibleCategories.isNotEmpty()) {
+            val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
+                selectedCategoryKey == "SYS_QUICK_FAV" ||
+                selectedCategoryKey == "SYS_RECENT" ||
+                selectedCategoryKey.startsWith("FOLDER_")
+
+            if (selectedCategoryKey.isEmpty() || !isCurrentKeyValid) {
+                selectedCategoryKey = visibleCategories.first().uniqueCategoryKey
+            }
         }
     }
 
-    val handleItemClick: (StreamItemEntity) -> Unit = { clickedStream ->
-        if (currentPlayingStream?.uniqueStreamKey == clickedStream.uniqueStreamKey) {
-            isExpandedToPureFullscreen = true
-            isFullscreenHudVisible = true
-            hudActivityTick++
-        } else {
-            onSelectStream(clickedStream)
-            playerEngine.playStream(clickedStream.streamUrl)
+    val streamsInSelectedCategory by remember(playlistId, selectedSection, selectedCategoryKey) {
+        when {
+            playlistId == 0L || selectedCategoryKey.isEmpty() -> flowOf(emptyList())
+            selectedCategoryKey == "SYS_RECENT" ->
+                dao.observeRecentlyWatched(playlistId, selectedSection)
+            selectedCategoryKey == "SYS_QUICK_FAV" ->
+                dao.observeQuickFavorites(playlistId, selectedSection)
+            selectedCategoryKey.startsWith("FOLDER_") -> {
+                val folderId = selectedCategoryKey.removePrefix("FOLDER_").toLongOrNull() ?: 0L
+                dao.observeStreamsInFavoriteFolder(folderId)
+            }
+            else -> dao.observeVisibleStreamsInCategory(selectedCategoryKey)
         }
-    }
+    }.collectAsState(initial = emptyList())
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AetherColors.ObsidianBlack)
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && isExpandedToPureFullscreen) {
-                    hudActivityTick++
-                    when (event.key) {
-                        Key.DirectionCenter, Key.Enter -> {
-                            if (!isFullscreenHudVisible) {
-                                isFullscreenHudVisible = true
-                                true
-                            } else false
-                        }
-                        Key.DirectionLeft -> {
-                            if (!isFullscreenHudVisible && isVodOrSeriesMode) {
-                                playerEngine.seekRelativeMs(-15_000L)
-                                isFullscreenHudVisible = true
-                                true
-                            } else false
-                        }
-                        Key.DirectionRight -> {
-                            if (!isFullscreenHudVisible && isVodOrSeriesMode) {
-                                playerEngine.seekRelativeMs(15_000L)
-                                isFullscreenHudVisible = true
-                                true
-                            } else false
-                        }
-                        Key.DirectionUp, Key.ChannelUp -> {
-                            if (!isVodOrSeriesMode) {
-                                onZapChannelOffset(-1)
-                                isFullscreenHudVisible = true
-                                true
-                            } else false
-                        }
-                        Key.DirectionDown, Key.ChannelDown -> {
-                            if (!isVodOrSeriesMode) {
-                                onZapChannelOffset(1)
-                                isFullscreenHudVisible = true
-                                true
-                            } else false
-                        }
-                        Key.Back, Key.Escape -> {
-                            if (isTrackSelectorVisible) {
-                                isTrackSelectorVisible = false
-                                true
-                            } else if (isVodOrSeriesMode) {
-                                onBackToDashboard()
-                                true
-                            } else {
-                                isExpandedToPureFullscreen = false
-                                true
-                            }
-                        }
-                        else -> false
+    // L10-Schutz: Ticker speichert NUR bei VOD und Serien (Niemals bei Live-TV!),
+    // um die 5-Sekunden-Recomposition-Schleife zu 100% zu verhindern!
+    val isEnginePlaying by playerEngine.isPlaying.collectAsState()
+    LaunchedEffect(isEnginePlaying, isCinemaPlayerActive) {
+        if (isEnginePlaying && isCinemaPlayerActive) {
+            var lastRecordedPos = -1L
+            while (true) {
+                delay(5000L)
+                val pos = playerEngine.currentPositionMs.value
+                val dur = playerEngine.durationMs.value
+                if (pos > 5000L && dur > 0L && pos != lastRecordedPos) {
+                    lastRecordedPos = pos
+                    val now = Clock.System.now().toEpochMilliseconds()
+                    currentPlayingEpisode?.let { ep ->
+                        dao.updateEpisodeWatchProgress(ep.uniqueEpisodeKey, pos, dur, now)
+                    } ?: currentPlayingStream?.let { stream ->
+                        dao.updateWatchProgress(stream.uniqueStreamKey, pos, dur, now)
                     }
-                } else false
-            }
-    ) {
-        if (isExpandedToPureFullscreen) {
-            AetherVideoSurface(
-                engine = playerEngine,
-                modifier = Modifier.fillMaxSize()
-            )
-
-            if (isFullscreenHudVisible) {
-                FullscreenPlayerHudOverlay(
-                    stream = currentPlayingStream,
-                    techSpecs = techSpecs,
-                    currentBufferPreset = currentBufferPreset,
-                    audioTracks = audioTracks,
-                    subtitleTracks = subtitleTracks,
-                    isTrackSelectorOpen = isTrackSelectorVisible,
-                    isVodOrSeriesMode = isVodOrSeriesMode,
-                    isPlaying = isPlaying,
-                    currentPositionMs = currentPosMs,
-                    durationMs = durationMs,
-                    onTogglePlayPause = {
-                        hudActivityTick++
-                        if (isPlaying) playerEngine.pause() else playerEngine.resume()
-                    },
-                    onSeekRelative = { offsetMs ->
-                        hudActivityTick++
-                        playerEngine.seekRelativeMs(offsetMs)
-                    },
-                    onToggleTrackSelector = {
-                        hudActivityTick++
-                        isTrackSelectorVisible = !isTrackSelectorVisible
-                    },
-                    onSelectAudio = {
-                        hudActivityTick++
-                        playerEngine.selectAudioTrack(it)
-                    },
-                    onSelectSubtitle = {
-                        hudActivityTick++
-                        playerEngine.selectSubtitleTrack(it)
-                    },
-                    onCycleBuffer = {
-                        hudActivityTick++
-                        onCycleBufferPreset()
-                    },
-                    onZapPrevious = {
-                        hudActivityTick++
-                        onZapChannelOffset(-1)
-                    },
-                    onZapNext = {
-                        hudActivityTick++
-                        onZapChannelOffset(1)
-                    },
-                    onExitFullscreen = {
-                        if (isVodOrSeriesMode) {
-                            onBackToDashboard()
-                        } else {
-                            isExpandedToPureFullscreen = false
-                        }
-                    },
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                )
-            }
-        } else {
-            // ============================================================
-            // TIVIMATE COCKPIT LAYOUT (60 FPS FLÜSSIG OHNE RECOMPOSITION-LOOP)
-            // ============================================================
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                // SPALTE 1: TiviMate Icon-Sidebar (ganz links)
-                TiviMateNavigationRail(
-                    activeSection = activeSection,
-                    onSelectSection = onSelectSection,
-                    onOpenSearch = onOpenSearch,
-                    onOpenSettings = onOpenSettings
-                )
-
-                // SPALTE 2: Gruppen / Kategorien
-                TiviMateCategoryColumn(
-                    categories = categories,
-                    favoriteFolders = favoriteFolders,
-                    selectedCategoryKey = selectedCategoryKey,
-                    onSelectCategory = onSelectCategory,
-                    modifier = Modifier
-                        .width(240.dp)
-                        .fillMaxHeight()
-                )
-
-                // RECHTE BÜHNE: Oben Mini-Player & Info / Unten Medienliste
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    // OBERE BÜHNE: Mini-Player (links) + Details (rechts daneben)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(200.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        AetherFocusableGlassCard(
-                            onClick = {
-                                if (currentPlayingStream != null) {
-                                    isExpandedToPureFullscreen = true
-                                    isFullscreenHudVisible = true
-                                    hudActivityTick++
-                                }
-                            },
-                            cornerRadius = 14.dp,
-                            modifier = Modifier
-                                .width(355.dp)
-                                .fillMaxHeight()
-                        ) {
-                            Box(modifier = Modifier.fillMaxSize()) {
-                                AetherVideoSurface(
-                                    engine = playerEngine,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .padding(8.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(AetherColors.ObsidianBlack.copy(alpha = 0.85f))
-                                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                                ) {
-                                    Text(
-                                        text = "⛶ 1x OK für Vollbild",
-                                        style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                                    )
-                                }
-                            }
-                        }
-
-                        TiviMateDetailsPanel(
-                            stream = displayStream,
-                            techSpecs = techSpecs,
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                        )
-                    }
-
-                    // UNTERE MEDIENLISTE: Flüssig mit hardwarenahem onFocusChanged
-                    TiviMateMediaListPanel(
-                        streams = streamsInCategory,
-                        currentPlayingStream = currentPlayingStream,
-                        onFocusStream = { focusedStreamItem = it },
-                        onStreamClick = handleItemClick,
-                        onQuickFavoriteToggle = onQuickFavoriteToggle,
-                        onLongPressFavoriteFolder = onOpenFavoriteFolderDialog,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                    )
                 }
             }
         }
     }
-}
 
-@Composable
-private fun TiviMateNavigationRail(
-    activeSection: AetherSectionType,
-    onSelectSection: (AetherSectionType) -> Unit,
-    onOpenSearch: () -> Unit,
-    onOpenSettings: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .width(68.dp)
-            .fillMaxHeight()
-            .clip(RoundedCornerShape(16.dp))
-            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.90f))
-            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-            .padding(vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.padding(bottom = 6.dp)
-            ) {
-                Text(
-                    text = "AETH",
-                    style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
+    AetherTheme {
+        when (navState.currentScreen) {
+            is AetherScreen.GatekeeperLock -> {
+                GatekeeperLockScreen(
+                    viewModel = gatekeeperViewModel,
+                    onUnlockedSuccess = {
+                        val next = if (activePlaylist != null) AetherScreen.LiveTv else AetherScreen.PlaylistSetup
+                        navigationViewModel.navigateTo(next)
+                    },
+                    onSecretAdminTriggered = navigationViewModel::openSecretAdminPanel
                 )
             }
 
-            TiviMateNavIcon(
-                icon = "🔍",
-                isSelected = false,
-                onClick = onOpenSearch
-            )
-
-            TiviMateNavIcon(
-                icon = "📺",
-                isSelected = activeSection == AetherSectionType.LIVE,
-                onClick = { onSelectSection(AetherSectionType.LIVE) }
-            )
-
-            TiviMateNavIcon(
-                icon = "🎬",
-                isSelected = activeSection == AetherSectionType.VOD,
-                onClick = { onSelectSection(AetherSectionType.VOD) }
-            )
-
-            TiviMateNavIcon(
-                icon = "🍿",
-                isSelected = activeSection == AetherSectionType.SERIES,
-                onClick = { onSelectSection(AetherSectionType.SERIES) }
-            )
-        }
-
-        TiviMateNavIcon(
-            icon = "⚙️",
-            isSelected = false,
-            onClick = onOpenSettings
-        )
-    }
-}
-
-@Composable
-private fun TiviMateNavIcon(
-    icon: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    AetherFocusableGlassCard(
-        onClick = onClick,
-        isSelected = isSelected,
-        cornerRadius = 12.dp,
-        enableScaleOnFocus = true,
-        modifier = Modifier
-            .width(48.dp)
-            .height(48.dp)
-    ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            Text(text = icon, style = MaterialTheme.typography.titleMedium)
-        }
-    }
-}
-
-@Composable
-private fun TiviMateCategoryColumn(
-    categories: List<CategoryEntity>,
-    favoriteFolders: List<FavoriteFolderEntity>,
-    selectedCategoryKey: String,
-    onSelectCategory: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
-            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-            .padding(10.dp)
-    ) {
-        item(key = "SYS_FAV") {
-            TiviMateCategoryRow(
-                title = "⭐ Favoriten",
-                isSelected = selectedCategoryKey == "SYS_QUICK_FAV",
-                onClick = { onSelectCategory("SYS_QUICK_FAV") }
-            )
-        }
-
-        item(key = "SYS_RECENT") {
-            TiviMateCategoryRow(
-                title = "🕒 Zuletzt gesehen",
-                isSelected = selectedCategoryKey == "SYS_RECENT" || selectedCategoryKey == "SYS_CONTINUE",
-                onClick = { onSelectCategory("SYS_RECENT") }
-            )
-        }
-
-        items(
-            items = favoriteFolders,
-            key = { "FOLDER_${it.folderId}" }
-        ) { folder ->
-            val key = "FOLDER_${folder.folderId}"
-            TiviMateCategoryRow(
-                title = "📁 ${folder.folderName}",
-                isSelected = selectedCategoryKey == key,
-                onClick = { onSelectCategory(key) }
-            )
-        }
-
-        items(
-            items = categories,
-            key = { it.uniqueCategoryKey }
-        ) { category ->
-            TiviMateCategoryRow(
-                title = category.categoryName,
-                isSelected = selectedCategoryKey == category.uniqueCategoryKey,
-                onClick = { onSelectCategory(category.uniqueCategoryKey) }
-            )
-        }
-    }
-}
-
-@Composable
-private fun TiviMateCategoryRow(
-    title: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    AetherFocusableGlassCard(
-        onClick = onClick,
-        isSelected = isSelected,
-        cornerRadius = 8.dp,
-        enableScaleOnFocus = false,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text(
-            text = title,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.titleMedium.copy(
-                color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
-            ),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
-        )
-    }
-}
-
-@Composable
-private fun TiviMateDetailsPanel(
-    stream: StreamItemEntity?,
-    techSpecs: StreamTechMetadata,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.85f))
-            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column {
-            Row(
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = stream?.name ?: "Kein Eintrag ausgewählt",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.CyberCyan)
-                )
-
-                Text(
-                    text = "${techSpecs.resolutionLabel} • ${techSpecs.fpsLabel}",
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
+            is AetherScreen.PlaylistSetup -> {
+                XtreamPlaylistSetupScreen(
+                    onSaveAndSyncPlaylist = { name, url, user, pass ->
+                        scope.launch {
+                            dao.insertOrUpdatePlaylist(
+                                PlaylistEntity(
+                                    id = activePlaylist?.id ?: 1L,
+                                    playlistName = name,
+                                    serverUrl = url.trim(),
+                                    username = user.trim(),
+                                    password = pass.trim(),
+                                    isActive = true,
+                                    isInitialSyncCompleted = false,
+                                    lastSyncEpochMillis = 0L
+                                )
+                            )
+                            dashboardViewModel.triggerManualSync()
+                            navigationViewModel.navigateTo(AetherScreen.LiveTv)
+                        }
+                    },
+                    onCancelIfPlaylistExists = if (activePlaylist != null) {
+                        { navigationViewModel.navigateTo(AetherScreen.LiveTv) }
+                    } else null
                 )
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            // ============================================================
+            // TIVIMATE DUAL COCKPIT (DAS NEUE HAUPT-DASHBOARD)
+            // ============================================================
+            is AetherScreen.LiveTv, is AetherScreen.Dashboard, is AetherScreen.VodMovies, is AetherScreen.Series -> {
+                LiveTvDualCockpitScreen(
+                    playerEngine = playerEngine,
+                    layoutMode = navState.liveTvLayoutMode,
+                    currentBufferPreset = navState.bufferPreset,
+                    categories = visibleCategories,
+                    favoriteFolders = favoriteFolders,
+                    selectedCategoryKey = selectedCategoryKey,
+                    streamsInCategory = streamsInSelectedCategory,
+                    currentPlayingStream = currentPlayingStream,
+                    currentChannelEpg = emptyList(),
+                    activeSection = selectedSection,
+                    startInPureFullscreen = isCinemaPlayerActive,
+                    isVodOrSeriesMode = selectedSection != AetherSectionType.LIVE,
+                    onSelectSection = { section ->
+                        selectedSection = section
+                        selectedCategoryKey = ""
+                    },
+                    onSelectCategory = { selectedCategoryKey = it },
+                    onSelectStream = { stream ->
+                        currentPlayingEpisode = null
+                        currentPlayingStream = stream
+                        isCinemaPlayerActive = (stream.sectionType == AetherSectionType.VOD)
+                        playerEngine.playStream(stream.streamUrl, stream.resumePositionMs)
+                    },
+                    onOpenSeriesCockpit = { seriesItem ->
+                        activeSeriesForModal = seriesItem
+                    },
+                    onQuickFavoriteToggle = { stream ->
+                        scope.launch {
+                            dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite)
+                        }
+                    },
+                    onOpenFavoriteFolderDialog = { stream ->
+                        folderDialogTargetStream = stream
+                    },
+                    onOpenSettings = {
+                        navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
+                    },
+                    onOpenSearch = {
+                        // Bereit für Roadmap Schritt 2 (Globale Suche)
+                    },
+                    onToggleLayoutMode = navigationViewModel::toggleLiveTvLayoutMode,
+                    onCycleBufferPreset = {
+                        val presets = StreamBufferPreset.entries
+                        val nextIndex = (presets.indexOf(navState.bufferPreset) + 1) % presets.size
+                        val nextPreset = presets[nextIndex]
+                        navigationViewModel.updateBufferPreset(nextPreset)
+                        playerEngine.applyBufferPreset(nextPreset)
+                    },
+                    onZapChannelOffset = { offset ->
+                        if (!isCinemaPlayerActive && streamsInSelectedCategory.isNotEmpty()) {
+                            val currentIndex = streamsInSelectedCategory.indexOfFirst {
+                                it.uniqueStreamKey == currentPlayingStream?.uniqueStreamKey
+                            }.coerceAtLeast(0)
+                            val targetIndex = (currentIndex + offset + streamsInSelectedCategory.size) %
+                                streamsInSelectedCategory.size
+                            val nextChannel = streamsInSelectedCategory[targetIndex]
+                            currentPlayingStream = nextChannel
+                            playerEngine.playStream(nextChannel.streamUrl)
+                        }
+                    },
+                    onBackToDashboard = {
+                        isCinemaPlayerActive = false
+                    }
+                )
+            }
 
-            Text(
-                text = if (!stream?.rating.isNullOrBlank()) "⭐ Bewertung: ${stream?.rating}" else "Bereit zur Wiedergabe",
-                style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.LaserAmber)
-            )
+            is AetherScreen.Settings -> {
+                navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
+            }
+        }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                text = stream?.plotDescription
-                    ?: "Drücke 1x OK auf einen Eintrag zum Abspielen im Vorschaufenster oder 2x OK für Vollbild.",
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary)
+        // ============================================================
+        // MODALES SERIEN-COCKPIT (Staffel- & Episodenauswahl)
+        // ============================================================
+        activeSeriesForModal?.let { seriesItem ->
+            AetherSeriesDetailModal(
+                seriesItem = seriesItem,
+                dao = dao,
+                onFetchEpisodes = { dashboardViewModel.fetchSeriesEpisodesOnDemand(seriesItem) },
+                onPlayEpisode = { episode, resume ->
+                    activeSeriesForModal = null
+                    isCinemaPlayerActive = true
+                    currentPlayingEpisode = episode
+                    val displayTitle = if (episode.title.contains(seriesItem.name, ignoreCase = true)) {
+                        episode.title
+                    } else {
+                        "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
+                    }
+                    currentPlayingStream = seriesItem.copy(
+                        name = displayTitle,
+                        streamUrl = episode.streamUrl
+                    )
+                    val startPos = if (resume) episode.resumePositionMs else 0L
+                    playerEngine.playStream(episode.streamUrl, startPos)
+                },
+                onDismiss = { activeSeriesForModal = null }
             )
         }
 
-        if (stream?.resumePositionMs ?: 0L > 0L && stream?.totalDurationMs ?: 0L > 0L) {
-            val progress = (stream!!.resumePositionMs.toFloat() / stream.totalDurationMs.toFloat()).coerceIn(0f, 1f)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = formatMillisToTimecode(stream.resumePositionMs),
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                )
-                LinearProgressIndicator(
-                    progress = { progress },
-                    color = AetherColors.CyberCyan,
-                    trackColor = AetherColors.ObsidianBlack,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(5.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                )
-                Text(
-                    text = formatMillisToTimecode(stream.totalDurationMs),
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
+        if (navState.isAdminModalVisible) {
+            SecretAdminPanelModal(
+                viewModel = gatekeeperViewModel,
+                onDismiss = navigationViewModel::dismissSecretAdminPanel
+            )
+        }
+
+        folderDialogTargetStream?.let { targetStream ->
+            CombinedFavoriteFolderModal(
+                streamItem = targetStream,
+                folders = favoriteFolders,
+                onToggleQuickFavorite = { stream ->
+                    scope.launch {
+                        dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite)
+                    }
+                },
+                onAssignToFolder = { folderId, stream ->
+                    scope.launch {
+                        dao.addStreamToFavoriteFolder(
+                            FavoriteFolderMappingEntity(
+                                folderId = folderId,
+                                uniqueStreamKey = stream.uniqueStreamKey,
+                                addedEpochMillis = Clock.System.now().toEpochMilliseconds()
+                            )
+                        )
+                    }
+                },
+                onCreateNewFolder = { folderName, stream ->
+                    scope.launch {
+                        val newFolderId = dao.createFavoriteFolder(
+                            FavoriteFolderEntity(
+                                playlistId = playlistId,
+                                folderName = folderName
+                            )
+                        )
+                        dao.addStreamToFavoriteFolder(
+                            FavoriteFolderMappingEntity(
+                                folderId = newFolderId,
+                                uniqueStreamKey = stream.uniqueStreamKey,
+                                addedEpochMillis = Clock.System.now().toEpochMilliseconds()
+                            )
+                        )
+                    }
+                },
+                onDismiss = { folderDialogTargetStream = null }
+            )
         }
     }
 }
 
 /**
- * L10 Saubere Medienliste: Aktualisiert die Info-Bühne hardwarenah über onFocusChanged,
- * ohne den Main-Thread mit Recomposition-Schleifen zu überlasten!
+ * Modales Serien-Cockpit für Staffeln und Episoden
  */
 @Composable
-private fun TiviMateMediaListPanel(
-    streams: List<StreamItemEntity>,
-    currentPlayingStream: StreamItemEntity?,
-    onFocusStream: (StreamItemEntity) -> Unit,
-    onStreamClick: (StreamItemEntity) -> Unit,
-    onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
-    onLongPressFavoriteFolder: (StreamItemEntity) -> Unit,
-    modifier: Modifier = Modifier
+private fun AetherSeriesDetailModal(
+    seriesItem: StreamItemEntity,
+    dao: AetherDao,
+    onFetchEpisodes: suspend () -> Boolean,
+    onPlayEpisode: (SeriesEpisodeEntity, Boolean) -> Unit,
+    onDismiss: () -> Unit
 ) {
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
-            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-            .padding(10.dp)
-    ) {
-        items(
-            items = streams,
-            key = { it.uniqueStreamKey }
-        ) { stream ->
-            val isPlaying = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
+    var isLoadingEpisodes by remember { mutableStateOf(false) }
+    var availableSeasons by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var selectedSeason by remember { mutableStateOf<Int?>(null) }
 
-            AetherFocusableGlassCard(
-                onClick = { onStreamClick(stream) },
-                onLongClick = { onLongPressFavoriteFolder(stream) },
-                isSelected = isPlaying,
-                cornerRadius = 8.dp,
-                enableScaleOnFocus = false,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .onFocusChanged { focusState ->
-                        if (focusState.isFocused) {
-                            onFocusStream(stream)
-                        }
-                    }
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 9.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            text = "${stream.customChannelNumber}",
-                            style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(AetherColors.ObsidianBlack.copy(alpha = 0.7f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = when (stream.sectionType) {
-                                    AetherSectionType.VOD -> "VOD"
-                                    AetherSectionType.SERIES -> "SERIE"
-                                    else -> "TV"
-                                },
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-
-                        if (isPlaying) {
-                            Text(
-                                text = "▶",
-                                style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                            )
-                        }
-
-                        Text(
-                            text = stream.name,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = if (isPlaying) AetherColors.CyberCyan else AetherColors.TextPrimary
-                            )
-                        )
-                    }
-
-                    AetherFocusableGlassCard(
-                        onClick = { onQuickFavoriteToggle(stream) },
-                        cornerRadius = 6.dp,
-                        enableScaleOnFocus = false
-                    ) {
-                        Text(
-                            text = if (stream.isQuickFavorite) "★" else "☆",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary
-                            ),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-            }
+    LaunchedEffect(seriesItem.uniqueStreamKey) {
+        val existingSeasons = dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
+        if (existingSeasons.isEmpty()) {
+            isLoadingEpisodes = true
+            onFetchEpisodes()
+            val updatedSeasons = dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
+            availableSeasons = updatedSeasons
+            selectedSeason = updatedSeasons.firstOrNull()
+            isLoadingEpisodes = false
+        } else {
+            availableSeasons = existingSeasons
+            selectedSeason = existingSeasons.firstOrNull()
         }
     }
-}
 
-@Composable
-private fun FullscreenPlayerHudOverlay(
-    stream: StreamItemEntity?,
-    techSpecs: StreamTechMetadata,
-    currentBufferPreset: StreamBufferPreset,
-    audioTracks: List<TrackOption>,
-    subtitleTracks: List<TrackOption>,
-    isTrackSelectorOpen: Boolean,
-    isVodOrSeriesMode: Boolean,
-    isPlaying: Boolean,
-    currentPositionMs: Long,
-    durationMs: Long,
-    onTogglePlayPause: () -> Unit,
-    onSeekRelative: (Long) -> Unit,
-    onToggleTrackSelector: () -> Unit,
-    onSelectAudio: (TrackOption) -> Unit,
-    onSelectSubtitle: (TrackOption?) -> Unit,
-    onCycleBuffer: () -> Unit,
-    onZapPrevious: () -> Unit,
-    onZapNext: () -> Unit,
-    onExitFullscreen: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 28.dp, vertical = 20.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(AetherColors.ObsidianBlack.copy(alpha = 0.90f))
-            .border(1.5.dp, AetherColors.CyberCyan, RoundedCornerShape(20.dp))
-            .padding(horizontal = 22.dp, vertical = 16.dp)
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = stream?.name ?: "AETHER STREAM",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleLarge.copy(color = AetherColors.TextPrimary)
-            )
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (techSpecs.reconnectAttempt > 0) {
-                    Text(
-                        text = "⚡ RECONNECT (${techSpecs.reconnectAttempt}/5)",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.LaserAmber)
-                    )
-                }
-                Text(
-                    text = "${techSpecs.resolutionLabel} • ${techSpecs.fpsLabel} • ${techSpecs.videoCodec} • ${techSpecs.audioCodec}",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                )
-            }
+    val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
+        val season = selectedSeason
+        if (season != null) {
+            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
+        } else {
+            flowOf(emptyList())
         }
+    }.collectAsState(initial = emptyList())
 
-        if (isVodOrSeriesMode && durationMs > 0L) {
-            Spacer(modifier = Modifier.height(10.dp))
-            val progress = (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .width(960.dp)
+                .height(580.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(AetherColors.DeepSpaceNavy)
+                .border(1.5.dp, AetherColors.CyberCyan, RoundedCornerShape(24.dp))
+                .padding(26.dp)
+        ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth()
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = Modifier.fillMaxSize()
             ) {
-                Text(
-                    text = formatMillisToTimecode(currentPositionMs),
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan)
-                )
-                LinearProgressIndicator(
-                    progress = { progress },
-                    color = AetherColors.CyberCyan,
-                    trackColor = AetherColors.DeepSpaceNavy,
+                Column(
+                    modifier = Modifier
+                        .width(300.dp)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text(
+                            text = seriesItem.name,
+                            style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (!seriesItem.rating.isNullOrBlank()) "⭐ ${seriesItem.rating}" else "HD Serie",
+                            style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = seriesItem.plotDescription ?: "Keine Inhaltsangabe verfügbar.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 8,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 10.dp) {
+                        Text(
+                            text = "SCHLIESSEN ✕",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+
+                Column(
                     modifier = Modifier
                         .weight(1f)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                )
-                Text(
-                    text = formatMillisToTimecode(durationMs),
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-        }
+                        .fillMaxHeight()
+                ) {
+                    if (isLoadingEpisodes) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = AetherColors.CyberCyan)
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    text = "Lade Staffeln & Episoden...",
+                                    style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
+                                )
+                            }
+                        }
+                    } else if (availableSeasons.isEmpty()) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            Text(
+                                text = "Keine Episoden für diese Serie gefunden.",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    } else {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(availableSeasons, key = { it }) { seasonNum ->
+                                val isSelected = selectedSeason == seasonNum
+                                AetherFocusableGlassCard(
+                                    onClick = { selectedSeason = seasonNum },
+                                    isSelected = isSelected,
+                                    cornerRadius = 8.dp
+                                ) {
+                                    Text(
+                                        text = "Staffel $seasonNum",
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
 
-        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            if (isVodOrSeriesMode) {
-                AetherFocusableGlassCard(onClick = onTogglePlayPause, cornerRadius = 10.dp) {
-                    Text(
-                        text = if (isPlaying) "⏸ PAUSE" else "▶️ PLAY",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
-                }
-                AetherFocusableGlassCard(onClick = { onSeekRelative(-15_000L) }, cornerRadius = 10.dp) {
-                    Text(
-                        text = "⏪ -15s",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-                AetherFocusableGlassCard(onClick = { onSeekRelative(15_000L) }, cornerRadius = 10.dp) {
-                    Text(
-                        text = "⏩ +15s",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-            } else {
-                AetherFocusableGlassCard(onClick = onZapPrevious, cornerRadius = 10.dp) {
-                    Text(
-                        text = "▲ KANAL -",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-                AetherFocusableGlassCard(onClick = onZapNext, cornerRadius = 10.dp) {
-                    Text(
-                        text = "▼ KANAL +",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-            }
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            items(episodesForSeason, key = { it.uniqueEpisodeKey }) { ep ->
+                                val hasResume = ep.resumePositionMs > 30_000L
+                                AetherFocusableGlassCard(
+                                    onClick = { onPlayEpisode(ep, hasResume) },
+                                    cornerRadius = 10.dp,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { isFocused ->
+                                    Row(
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Folge ${ep.episodeNumber}: ${ep.title}",
+                                                style = MaterialTheme.typography.titleMedium.copy(
+                                                    color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (!ep.plotDescription.isNullOrBlank()) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = ep.plotDescription,
+                                                    style = MaterialTheme.typography.bodySmall.copy(color = AetherColors.TextSecondary),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            if (ep.resumePositionMs > 0L && ep.durationMs > 0L) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                val progress = (ep.resumePositionMs.toFloat() / ep.durationMs.toFloat()).coerceIn(0.05f, 1f)
+                                                LinearProgressIndicator(
+                                                    progress = { progress },
+                                                    color = AetherColors.CyberCyan,
+                                                    trackColor = AetherColors.DeepSpaceNavy,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth(0.5f)
+                                                        .height(4.dp)
+                                                        .clip(RoundedCornerShape(2.dp))
+                                                )
+                                            }
+                                        }
 
-            AetherFocusableGlassCard(onClick = onToggleTrackSelector, cornerRadius = 10.dp) {
-                Text(
-                    text = "🔊 TON & SUB (${audioTracks.size})",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.CyberCyan),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
-            AetherFocusableGlassCard(onClick = onCycleBuffer, cornerRadius = 10.dp) {
-                Text(
-                    text = "🛡️ ${currentBufferPreset.title}",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.NeonEmerald),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
-            AetherFocusableGlassCard(onClick = onExitFullscreen, cornerRadius = 10.dp) {
-                Text(
-                    text = if (isVodOrSeriesMode) "◄ ZURÜCK" else "⊞ ÜBERSICHT",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
+                                        Spacer(modifier = Modifier.width(14.dp))
+
+                                        Text(
+                                            text = if (hasResume) "▶️ Fortsetzen" else "▶️ Abspielen",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
