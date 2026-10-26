@@ -40,6 +40,7 @@ import com.aether.stream.core.navigation.AetherScreen
 import com.aether.stream.core.navigation.StreamBufferPreset
 import com.aether.stream.core.platform.EnforceLandscapeCockpitMode
 import com.aether.stream.core.theme.AetherColors
+import com.aether.stream.core.theme.AetherTheme
 import com.aether.stream.core.ui.AetherFocusableGlassCard
 import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
@@ -338,6 +339,9 @@ fun AetherApp(
     }
 }
 
+/**
+ * Modales Serien-Cockpit für Staffeln und Episoden
+ */
 @Composable
 private fun AetherSeriesDetailModal(
     seriesItem: StreamItemEntity,
