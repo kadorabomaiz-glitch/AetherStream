@@ -345,10 +345,6 @@ fun LiveTvDualCockpitScreen(
     }
 }
 
-/**
- * TiviMate-Seitenleiste (Spalte 1):
- * Such-Icon, TV, Filme, Serien, Favoriten, Settings
- */
 @Composable
 private fun TiviMateNavigationRail(
     activeSection: AetherSectionType,
@@ -362,7 +358,7 @@ private fun TiviMateNavigationRail(
             .fillMaxHeight()
             .clip(RoundedCornerShape(16.dp))
             .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.90f))
-            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
             .padding(vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
@@ -371,11 +367,9 @@ private fun TiviMateNavigationRail(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // AETHER Logo
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .padding(bottom = 6.dp)
+                modifier = Modifier.padding(bottom = 6.dp)
             ) {
                 Text(
                     text = "AETH",
@@ -383,28 +377,24 @@ private fun TiviMateNavigationRail(
                 )
             }
 
-            // Suche
             TiviMateNavIcon(
                 icon = "🔍",
                 isSelected = false,
                 onClick = onOpenSearch
             )
 
-            // TV
             TiviMateNavIcon(
                 icon = "📺",
                 isSelected = activeSection == AetherSectionType.LIVE,
                 onClick = { onSelectSection(AetherSectionType.LIVE) }
             )
 
-            // Filme (VOD)
             TiviMateNavIcon(
                 icon = "🎬",
                 isSelected = activeSection == AetherSectionType.VOD,
                 onClick = { onSelectSection(AetherSectionType.VOD) }
             )
 
-            // Serien
             TiviMateNavIcon(
                 icon = "🍿",
                 isSelected = activeSection == AetherSectionType.SERIES,
@@ -412,7 +402,6 @@ private fun TiviMateNavigationRail(
             )
         }
 
-        // Settings (Zahnrad ganz unten)
         TiviMateNavIcon(
             icon = "⚙️",
             isSelected = false,
@@ -442,9 +431,6 @@ private fun TiviMateNavIcon(
     }
 }
 
-/**
- * TiviMate Gruppen-Spalte (Spalte 2)
- */
 @Composable
 private fun TiviMateCategoryColumn(
     categories: List<CategoryEntity>,
@@ -458,7 +444,7 @@ private fun TiviMateCategoryColumn(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
-            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
             .padding(10.dp)
     ) {
         item(key = "SYS_FAV") {
@@ -527,9 +513,6 @@ private fun TiviMateCategoryRow(
     }
 }
 
-/**
- * TiviMate Info-Bühne oben rechts (neben dem Mini-Player)
- */
 @Composable
 private fun TiviMateDetailsPanel(
     stream: StreamItemEntity?,
@@ -540,7 +523,7 @@ private fun TiviMateDetailsPanel(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.85f))
-            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(14.dp))
+            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
             .padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
@@ -611,9 +594,6 @@ private fun TiviMateDetailsPanel(
     }
 }
 
-/**
- * TiviMate Untere Liste (Kanalliste / Filme / Serien)
- */
 @Composable
 private fun TiviMateMediaListPanel(
     streams: List<StreamItemEntity>,
@@ -630,7 +610,7 @@ private fun TiviMateMediaListPanel(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.70f))
-            .border(1.dp, AetherColors.GlassBorder, RoundedCornerShape(16.dp))
+            .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
             .padding(10.dp)
     ) {
         items(
@@ -638,7 +618,6 @@ private fun TiviMateMediaListPanel(
             key = { it.uniqueStreamKey }
         ) { stream ->
             val isPlaying = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
-            val isFocused = focusedStreamItem?.uniqueStreamKey == stream.uniqueStreamKey
 
             AetherFocusableGlassCard(
                 onClick = { onStreamClick(stream) },
@@ -721,9 +700,6 @@ private fun TiviMateMediaListPanel(
     }
 }
 
-/**
- * Vollbild-Kino-HUD (Auto-Hide nach 4,5 Sekunden, 1-zeiliger Titel, keine Überlappung)
- */
 @Composable
 private fun FullscreenPlayerHudOverlay(
     stream: StreamItemEntity?,
