@@ -31,6 +31,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
@@ -40,7 +46,24 @@ class AndroidMedia3PlayerEngine(
 
     companion object {
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
-        private val VOD_CONTAINER_FALLBACKS = listOf("mp4", "mkv", "ts")
+        private val VOD_CONTAINER_FALLBACKS = listOf("mkv", "mp4", "ts")
+
+        init {
+            // L10 TiviMate SSL-Trust-Engine: Erlaubt das Abspielen von VOD- und Storage-Servern
+            // mit selbstsignierten oder IP-gebundenen SSL-Zertifikaten (verhindert SSLHandshakeException!)
+            runCatching {
+                val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+                })
+                val sslContext = SSLContext.getInstance("TLS").apply {
+                    init(null, trustAllCerts, SecureRandom())
+                }
+                HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+                HttpsURLConnection.setDefaultHostnameVerifier { _, _ -> true }
+            }
+        }
     }
 
     private val scope = CoroutineScope(Dispatchers.Main)
@@ -124,7 +147,7 @@ class AndroidMedia3PlayerEngine(
                 val candidateUrl = buildSmartFallbackUrl(baseUrl, reconnectCount)
 
                 scope.launch {
-                    delay(650L * reconnectCount)
+                    delay(500L * reconnectCount)
                     runCatching {
                         exoPlayer.stop()
                         exoPlayer.clearMediaItems()
@@ -140,11 +163,6 @@ class AndroidMedia3PlayerEngine(
     internal var exoPlayer: ExoPlayer = buildExoPlayer(currentPreset)
         private set
 
-    /**
-     * L10 Smart-Container-Fallback:
-     * Wenn ein VOD- oder Serien-Stream mit der gemeldeten Dateiendung fehlschlägt (z.B. .mp4 liefert 404),
-     * probiert die Engine automatisch .mkv und .ts aus!
-     */
     private fun buildSmartFallbackUrl(originalUrl: String, attempt: Int): String {
         val isVodOrSeries = originalUrl.contains("/movie/") || originalUrl.contains("/series/")
         if (!isVodOrSeries || attempt <= 1) return originalUrl
