@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -239,7 +240,7 @@ fun LiveTvDualCockpitScreen(
             }
         } else {
             // ============================================================
-            // DAS NEUE TIVIMATE-HAUPTBILDSCHIRM-LAYOUT (1:1 NACH SCREENSHOT)
+            // TIVIMATE COCKPIT LAYOUT (60 FPS FLÜSSIG OHNE RECOMPOSITION-LOOP)
             // ============================================================
             Row(
                 modifier = Modifier
@@ -247,7 +248,7 @@ fun LiveTvDualCockpitScreen(
                     .padding(14.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // SPALTE 1: Die schmale TiviMate-Icon-Seitenleiste (ganz links)
+                // SPALTE 1: TiviMate Icon-Sidebar (ganz links)
                 TiviMateNavigationRail(
                     activeSection = activeSection,
                     onSelectSection = onSelectSection,
@@ -255,7 +256,7 @@ fun LiveTvDualCockpitScreen(
                     onOpenSettings = onOpenSettings
                 )
 
-                // SPALTE 2: Die Kategorien / Gruppen
+                // SPALTE 2: Gruppen / Kategorien
                 TiviMateCategoryColumn(
                     categories = categories,
                     favoriteFolders = favoriteFolders,
@@ -266,21 +267,20 @@ fun LiveTvDualCockpitScreen(
                         .fillMaxHeight()
                 )
 
-                // RECHTER BEREICH: Zweigeteilt (Oben Bühne / Unten Liste)
+                // RECHTE BÜHNE: Oben Mini-Player & Info / Unten Medienliste
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // OBERER BLOCK: Mini-Player (links) + Programm-Info (rechts daneben)
+                    // OBERE BÜHNE: Mini-Player (links) + Details (rechts daneben)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(200.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        // 16:9 Mini-Player Vorschaufenster
                         AetherFocusableGlassCard(
                             onClick = {
                                 if (currentPlayingStream != null) {
@@ -316,7 +316,6 @@ fun LiveTvDualCockpitScreen(
                             }
                         }
 
-                        // Programm-Info / Details zum ausgewählten Element
                         TiviMateDetailsPanel(
                             stream = displayStream,
                             techSpecs = techSpecs,
@@ -326,11 +325,10 @@ fun LiveTvDualCockpitScreen(
                         )
                     }
 
-                    // UNTERER BLOCK: Die nummerierte Kanalliste / Medienliste
+                    // UNTERE MEDIENLISTE: Flüssig mit hardwarenahem onFocusChanged
                     TiviMateMediaListPanel(
                         streams = streamsInCategory,
                         currentPlayingStream = currentPlayingStream,
-                        focusedStreamItem = focusedStreamItem,
                         onFocusStream = { focusedStreamItem = it },
                         onStreamClick = handleItemClick,
                         onQuickFavoriteToggle = onQuickFavoriteToggle,
@@ -594,11 +592,14 @@ private fun TiviMateDetailsPanel(
     }
 }
 
+/**
+ * L10 Saubere Medienliste: Aktualisiert die Info-Bühne hardwarenah über onFocusChanged,
+ * ohne den Main-Thread mit Recomposition-Schleifen zu überlasten!
+ */
 @Composable
 private fun TiviMateMediaListPanel(
     streams: List<StreamItemEntity>,
     currentPlayingStream: StreamItemEntity?,
-    focusedStreamItem: StreamItemEntity?,
     onFocusStream: (StreamItemEntity) -> Unit,
     onStreamClick: (StreamItemEntity) -> Unit,
     onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
@@ -625,12 +626,14 @@ private fun TiviMateMediaListPanel(
                 isSelected = isPlaying,
                 cornerRadius = 8.dp,
                 enableScaleOnFocus = false,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { focusState ->
+                        if (focusState.isFocused) {
+                            onFocusStream(stream)
+                        }
+                    }
             ) {
-                LaunchedEffect(Unit) {
-                    onFocusStream(stream)
-                }
-
                 Row(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
