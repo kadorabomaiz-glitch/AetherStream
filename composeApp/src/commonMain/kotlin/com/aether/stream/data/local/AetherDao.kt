@@ -93,6 +93,9 @@ interface AetherDao {
     """)
     fun observeVisibleStreamsInCategory(uniqueCategoryKey: String): Flow<List<StreamItemEntity>>
 
+    @Query("SELECT COUNT(*) FROM stream_items WHERE uniqueCategoryKey = :uniqueCategoryKey")
+    suspend fun getStreamCountInCategory(uniqueCategoryKey: String): Int
+
     @Query("""
         SELECT * FROM categories 
         WHERE playlistId = :playlistId 
@@ -187,6 +190,29 @@ interface AetherDao {
     fun observeRecentlyWatched(
         playlistId: Long,
         sectionType: AetherSectionType
+    ): Flow<List<StreamItemEntity>>
+
+    /**
+     * GLOBALE SUCHE: Sucht simultan über Live-TV, VOD-Filme und Serien
+     */
+    @Query("""
+        SELECT * FROM stream_items 
+        WHERE playlistId = :playlistId 
+          AND isVisible = 1 
+          AND isLocked = 0 
+          AND name LIKE '%' || :searchQuery || '%' 
+        ORDER BY 
+          CASE sectionType 
+            WHEN 'LIVE' THEN 1 
+            WHEN 'VOD' THEN 2 
+            WHEN 'SERIES' THEN 3 
+          END, 
+          name ASC 
+        LIMIT 100
+    """)
+    fun searchVisibleStreams(
+        playlistId: Long,
+        searchQuery: String
     ): Flow<List<StreamItemEntity>>
 
     // ==========================================
