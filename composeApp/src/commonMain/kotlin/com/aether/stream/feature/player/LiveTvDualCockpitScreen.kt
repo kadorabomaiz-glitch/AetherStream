@@ -10,7 +10,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -33,6 +32,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aether.stream.core.navigation.LiveTvLayoutMode
+import com.aether.stream.core.navigation.StreamBufferPreset
 import com.aether.stream.core.theme.AetherColors
 import com.aether.stream.data.local.*
 import kotlinx.coroutines.Job
@@ -54,50 +55,71 @@ data class CockpitCategoryUiItem(
 @Composable
 fun LiveTvDualCockpitScreen(
     playerEngine: AetherVideoPlayerEngine,
-    activeSection: AetherSectionType,
+    layoutMode: LiveTvLayoutMode,
+    currentBufferPreset: StreamBufferPreset,
     categories: List<CategoryEntity>,
     favoriteFolders: List<FavoriteFolderEntity>,
     selectedCategoryKey: String,
-    streams: List<StreamItemEntity>,
-    activeStream: StreamItemEntity?,
-    focusedPreviewStream: StreamItemEntity?,
-    isFullscreen: Boolean,
-    isCinemaPlayerActive: Boolean,
-    isSyncing: Boolean,
-    syncStatusMessage: String?,
-    currentBufferPreset: StreamBufferPreset,
-    selectedSeriesForModal: StreamItemEntity?,
-    seriesEpisodes: List<SeriesEpisodeEntity>,
-    isSeriesLoading: Boolean,
-    onSelectSection: (AetherSectionType) -> Unit,
+    streamsInCategory: List<StreamItemEntity>,
+    currentPlayingStream: StreamItemEntity?,
+    currentChannelEpg: List<EpgProgramEntity>,
+    activeSection: AetherSectionType = AetherSectionType.LIVE,
+    startInPureFullscreen: Boolean = false,
+    isVodOrSeriesMode: Boolean = false,
+    onSelectSection: (AetherSectionType) -> Unit = {},
     onSelectCategory: (String) -> Unit,
     onSelectStream: (StreamItemEntity) -> Unit,
-    onFocusStreamChanged: (StreamItemEntity) -> Unit,
-    onToggleQuickFavorite: (StreamItemEntity) -> Unit,
-    onEnterFullscreen: () -> Unit,
-    onExitFullscreen: () -> Unit,
-    onDismissSeriesModal: () -> Unit,
-    onPlaySeriesEpisode: (SeriesEpisodeEntity) -> Unit,
-    onApplyBufferPreset: (StreamBufferPreset) -> Unit,
+    onOpenSeriesCockpit: (StreamItemEntity) -> Unit = {},
+    onQuickFavoriteToggle: (StreamItemEntity) -> Unit,
+    onOpenFavoriteFolderDialog: (StreamItemEntity) -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenSearch: () -> Unit = {},
-    onOpenSettings: () -> Unit = {}
+    onToggleLayoutMode: () -> Unit,
+    onCycleBufferPreset: () -> Unit,
+    onZapChannelOffset: (Int) -> Unit,
+    onBackToDashboard: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
+
     val railFocusRequester = remember { FocusRequester() }
     val activeCategoryFocusRequester = remember { FocusRequester() }
     val mediaListEntryFocusRequester = remember { FocusRequester() }
 
     var categoryScrubJob by remember { mutableStateOf<Job?>(null) }
+    var focusedPreviewStream by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var isPureFullscreen by remember { mutableStateOf(startInPureFullscreen) }
+
+    // Synchronisiert den Pure-Fullscreen-Start bei VOD & Serien-Episoden
+    LaunchedEffect(startInPureFullscreen, currentPlayingStream?.uniqueStreamKey) {
+        if (startInPureFullscreen && currentPlayingStream != null) {
+            isPureFullscreen = true
+        }
+    }
 
     val categoryUiItems = remember(categories, favoriteFolders, activeSection) {
         buildList {
             add(CockpitCategoryUiItem(SYS_QUICK_FAV, "Favoriten", "⭐ ", isSystem = true))
             add(CockpitCategoryUiItem(SYS_RECENT, "Zuletzt gesehen", "🕒 ", isSystem = true))
             favoriteFolders.forEach { folder ->
-                add(CockpitCategoryUiItem("$FOLDER_PREFIX${folder.id}", folder.folderName, "📁 ", isSystem = true))
+                add(
+                    CockpitCategoryUiItem(
+                        key = "$FOLDER_PREFIX${folder.folderId}",
+                        title = folder.folderName,
+                        iconPrefix = "📁 ",
+                        isSystem = true
+                    )
+                )
             }
             categories.forEach { cat ->
-                add(CockpitCategoryUiItem(cat.categoryId, cat.categoryName, "", false, cat.isNewlyDiscovered))
+                add(
+                    CockpitCategoryUiItem(
+                        key = cat.uniqueCategoryKey,
+                        title = cat.categoryName,
+                        iconPrefix = "",
+                        isSystem = false,
+                        isNewlyDiscovered = cat.isNewlyDiscovered
+                    )
+                )
             }
         }
     }
@@ -106,6 +128,7 @@ fun LiveTvDualCockpitScreen(
     val mediaListState = rememberLazyListState()
 
     LaunchedEffect(activeSection) {
+        focusedPreviewStream = null
         categoryListState.scrollToItem(0)
         mediaListState.scrollToItem(0)
     }
@@ -120,43 +143,58 @@ fun LiveTvDualCockpitScreen(
             .background(AetherColors.ObsidianBlack)
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown && (event.key == Key.Back || event.key == Key.Escape)) {
-                    when {
-                        selectedSeriesForModal != null -> {
-                            onDismissSeriesModal()
-                            true
-                        }
-                        isFullscreen -> {
-                            onExitFullscreen()
-                            true
-                        }
-                        else -> false
+                    if (isPureFullscreen) {
+                        isPureFullscreen = false
+                        onBackToDashboard()
+                        true
+                    } else {
+                        false
                     }
-                } else false
+                } else {
+                    false
+                }
             }
     ) {
-        if (isFullscreen) {
+        if (isPureFullscreen) {
+            // =========================================================================
+            // PURE FULLSCREEN STAGE (0ms Frame-Drop Übergang der AetherVideoSurface)
+            // =========================================================================
             Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                AetherVideoSurface(playerEngine, Modifier.fillMaxSize())
+                AetherVideoSurface(
+                    engine = playerEngine,
+                    modifier = Modifier.fillMaxSize()
+                )
+
                 FullscreenPlayerHudOverlay(
                     playerEngine = playerEngine,
-                    streamTitle = activeStream?.name ?: "Aether Stream",
-                    isCinemaMode = isCinemaPlayerActive,
+                    streamTitle = currentPlayingStream?.name ?: "Aether Stream",
+                    isCinemaMode = isVodOrSeriesMode || startInPureFullscreen,
                     currentPreset = currentBufferPreset,
-                    onApplyPreset = onApplyBufferPreset,
-                    onExitFullscreen = onExitFullscreen
+                    onCyclePreset = onCycleBufferPreset,
+                    onZapChannelOffset = onZapChannelOffset,
+                    onExitFullscreen = {
+                        isPureFullscreen = false
+                        onBackToDashboard()
+                    }
                 )
             }
         } else {
+            // =========================================================================
+            // TIVIMATE 4-ZONEN 10-FOOT DUAL-COCKPIT
+            // =========================================================================
             Row(
-                modifier = Modifier.fillMaxSize().padding(10.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // ZONE 1: Left Navigation Rail
                 LeftNavigationRailZone1(
                     activeSection = activeSection,
-                    isSyncing = isSyncing,
                     railFocusRequester = railFocusRequester,
-                    onNavigateRightToCategories = { runCatching { activeCategoryFocusRequester.requestFocus() } },
+                    onNavigateRightToCategories = {
+                        runCatching { activeCategoryFocusRequester.requestFocus() }
+                    },
                     onSelectSection = { section ->
                         categoryScrubJob?.cancel()
                         onSelectSection(section)
@@ -165,7 +203,7 @@ fun LiveTvDualCockpitScreen(
                     onOpenSettings = onOpenSettings
                 )
 
-                // ZONE 2: Obsidian Neon Glass Category Column
+                // ZONE 2: Obsidian Neon Glass Category Column (3-Tier D-Pad Engine)
                 Column(
                     modifier = Modifier
                         .width(250.dp)
@@ -176,7 +214,9 @@ fun LiveTvDualCockpitScreen(
                         .padding(vertical = 10.dp, horizontal = 8.dp)
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -198,17 +238,6 @@ fun LiveTvDualCockpitScreen(
                         )
                     }
 
-                    if (!syncStatusMessage.isNullOrBlank()) {
-                        Text(
-                            text = syncStatusMessage,
-                            color = AetherColors.NeonEmerald,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
-                    }
-
                     Spacer(modifier = Modifier.height(4.dp))
 
                     LazyColumn(
@@ -222,7 +251,11 @@ fun LiveTvDualCockpitScreen(
                             key = { item -> "${activeSection.name}_${item.key}" }
                         ) { item ->
                             val isSelected = item.key == selectedCategoryKey
-                            val itemMod = if (isSelected) Modifier.focusRequester(activeCategoryFocusRequester) else Modifier
+                            val itemMod = if (isSelected) {
+                                Modifier.focusRequester(activeCategoryFocusRequester)
+                            } else {
+                                Modifier
+                            }
 
                             ObsidianCategoryRowItem(
                                 item = item,
@@ -232,6 +265,7 @@ fun LiveTvDualCockpitScreen(
                                     if (focusedKey != selectedCategoryKey) {
                                         categoryScrubJob?.cancel()
                                         categoryScrubJob = coroutineScope.launch {
+                                            // 120ms Settle-Debounce für 60 FPS D-Pad Hold-Scrubbing
                                             delay(120L)
                                             onSelectCategory(focusedKey)
                                         }
@@ -239,7 +273,9 @@ fun LiveTvDualCockpitScreen(
                                 },
                                 onInstantCommit = { committedKey ->
                                     categoryScrubJob?.cancel()
-                                    if (committedKey != selectedCategoryKey) onSelectCategory(committedKey)
+                                    if (committedKey != selectedCategoryKey) {
+                                        onSelectCategory(committedKey)
+                                    }
                                 },
                                 onNavigateLeftToRail = {
                                     categoryScrubJob?.cancel()
@@ -247,7 +283,9 @@ fun LiveTvDualCockpitScreen(
                                 },
                                 onNavigateRightToMediaList = { committedKey ->
                                     categoryScrubJob?.cancel()
-                                    if (committedKey != selectedCategoryKey) onSelectCategory(committedKey)
+                                    if (committedKey != selectedCategoryKey) {
+                                        onSelectCategory(committedKey)
+                                    }
                                     runCatching { mediaListEntryFocusRequester.requestFocus() }
                                 }
                             )
@@ -255,12 +293,14 @@ fun LiveTvDualCockpitScreen(
                     }
                 }
 
-                // ZONE 3 (TOP) + ZONE 4 (BOTTOM)
+                // RECHTE BÜHNE: ZONE 3 (OBEN) + ZONE 4 (UNTEN)
                 Column(
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // ZONE 3: Mini-Player + Details Panel
+                    // ZONE 3: 16:9 Live Mini-Player + TiviMateDetailsPanel
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -280,20 +320,37 @@ fun LiveTvDualCockpitScreen(
                                 .background(Color.Black)
                                 .border(
                                     width = if (isMiniFocused) 2.dp else 1.dp,
-                                    color = if (isMiniFocused) AetherColors.CyberCyan else AetherColors.CyberCyan.copy(alpha = 0.35f),
+                                    color = if (isMiniFocused) {
+                                        AetherColors.CyberCyan
+                                    } else {
+                                        AetherColors.CyberCyan.copy(alpha = 0.35f)
+                                    },
                                     shape = RoundedCornerShape(8.dp)
                                 )
                                 .onFocusChanged { isMiniFocused = it.isFocused }
                                 .focusable()
-                                .clickable { onEnterFullscreen() }
+                                .clickable {
+                                    if (currentPlayingStream != null) {
+                                        isPureFullscreen = true
+                                    }
+                                }
                                 .onKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown && (event.key == Key.DirectionCenter || event.key == Key.Enter)) {
-                                        onEnterFullscreen()
+                                    if (event.type == KeyEventType.KeyDown &&
+                                        (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                                    ) {
+                                        if (currentPlayingStream != null) {
+                                            isPureFullscreen = true
+                                        }
                                         true
-                                    } else false
+                                    } else {
+                                        false
+                                    }
                                 }
                         ) {
-                            AetherVideoSurface(playerEngine, Modifier.fillMaxSize())
+                            AetherVideoSurface(
+                                engine = playerEngine,
+                                modifier = Modifier.fillMaxSize()
+                            )
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.TopStart)
@@ -303,7 +360,7 @@ fun LiveTvDualCockpitScreen(
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = if (activeStream != null) "LIVE PREVIEW • OK = VOLLBILD" else "BEREIT",
+                                    text = if (currentPlayingStream != null) "LIVE PREVIEW • OK = VOLLBILD" else "BEREIT",
                                     color = AetherColors.CyberCyan,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold
@@ -313,12 +370,15 @@ fun LiveTvDualCockpitScreen(
 
                         TiviMateDetailsPanel(
                             playerEngine = playerEngine,
-                            stream = focusedPreviewStream ?: activeStream,
-                            modifier = Modifier.weight(1f).fillMaxHeight()
+                            stream = focusedPreviewStream ?: currentPlayingStream,
+                            currentEpg = currentChannelEpg,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
                         )
                     }
 
-                    // ZONE 4: Media List
+                    // ZONE 4: Nummerierte Media-Liste (TV / VOD / SERIE)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -328,14 +388,13 @@ fun LiveTvDualCockpitScreen(
                             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
                             .padding(8.dp)
                     ) {
-                        if (streams.isEmpty()) {
+                        if (streamsInCategory.isEmpty()) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
-                                    text = when {
-                                        isSyncing -> "Synchronisiere Streams im Hintergrund..."
-                                        selectedCategoryKey == SYS_QUICK_FAV -> "Noch keine Favoriten markiert (★)."
-                                        selectedCategoryKey == SYS_RECENT -> "Noch keine zuletzt gesehenen Einträge."
-                                        else -> "Keine Einträge in dieser Kategorie."
+                                    text = when (selectedCategoryKey) {
+                                        SYS_QUICK_FAV -> "Noch keine Favoriten in diesem Bereich markiert (★)."
+                                        SYS_RECENT -> "Noch keine zuletzt gesehenen Einträge in diesem Bereich."
+                                        else -> "Keine Einträge in dieser Kategorie vorhanden."
                                     },
                                     color = AetherColors.IceBlue.copy(alpha = 0.7f),
                                     fontSize = 14.sp
@@ -349,20 +408,45 @@ fun LiveTvDualCockpitScreen(
                                 contentPadding = PaddingValues(vertical = 4.dp)
                             ) {
                                 itemsIndexed(
-                                    items = streams,
-                                    key = { _, stream -> stream.streamKey }
+                                    items = streamsInCategory,
+                                    key = { _, stream -> stream.uniqueStreamKey }
                                 ) { index, stream ->
-                                    val isPlayingThis = activeStream?.streamKey == stream.streamKey
-                                    val entryMod = if (index == 0) Modifier.focusRequester(mediaListEntryFocusRequester) else Modifier
+                                    val isPlayingThis = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
+                                    val entryMod = if (index == 0) {
+                                        Modifier.focusRequester(mediaListEntryFocusRequester)
+                                    } else {
+                                        Modifier
+                                    }
 
                                     Zone4MediaRowItem(
                                         indexNumber = index + 1,
                                         stream = stream,
                                         isCurrentlyPlaying = isPlayingThis,
                                         modifier = entryMod,
-                                        onFocused = { onFocusStreamChanged(stream) },
-                                        onClickStream = { onSelectStream(stream) },
-                                        onToggleFavorite = { onToggleQuickFavorite(stream) },
+                                        onFocused = { focusedPreviewStream = stream },
+                                        onClickStream = {
+                                            when (stream.sectionType) {
+                                                AetherSectionType.SERIES -> {
+                                                    onOpenSeriesCockpit(stream)
+                                                }
+                                                AetherSectionType.VOD -> {
+                                                    // 1-Click Pure Fullscreen für VOD-Filme
+                                                    isPureFullscreen = true
+                                                    onSelectStream(stream)
+                                                }
+                                                AetherSectionType.LIVE -> {
+                                                    // 1. Klick = Mini-Player, 2. Klick auf denselben Sender = Vollbild
+                                                    if (isPlayingThis) {
+                                                        isPureFullscreen = true
+                                                    } else {
+                                                        isPureFullscreen = false
+                                                        onSelectStream(stream)
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        onToggleFavorite = { onQuickFavoriteToggle(stream) },
+                                        onOpenFolderModal = { onOpenFavoriteFolderDialog(stream) },
                                         onNavigateLeftToCategories = {
                                             runCatching { activeCategoryFocusRequester.requestFocus() }
                                         }
@@ -374,23 +458,12 @@ fun LiveTvDualCockpitScreen(
                 }
             }
         }
-
-        if (selectedSeriesForModal != null) {
-            AetherSeriesDetailModal(
-                seriesItem = selectedSeriesForModal,
-                episodes = seriesEpisodes,
-                isLoading = isSeriesLoading,
-                onDismiss = onDismissSeriesModal,
-                onPlayEpisode = onPlaySeriesEpisode
-            )
-        }
     }
 }
 
 @Composable
 private fun LeftNavigationRailZone1(
     activeSection: AetherSectionType,
-    isSyncing: Boolean,
     railFocusRequester: FocusRequester,
     onNavigateRightToCategories: () -> Unit,
     onSelectSection: (AetherSectionType) -> Unit,
@@ -408,24 +481,21 @@ private fun LeftNavigationRailZone1(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(AetherColors.CyberCyan.copy(alpha = 0.16f))
-                    .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 6.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("AETH", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
-            }
-            if (isSyncing) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(AetherColors.NeonEmerald))
-            }
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(AetherColors.CyberCyan.copy(alpha = 0.16f))
+                .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("AETH", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
             RailIconButton("🔍", "Suche", false, Modifier, onNavigateRightToCategories, onOpenSearch)
             RailIconButton(
                 icon = "📺",
@@ -515,7 +585,7 @@ private fun RailIconButton(
             color = when {
                 isFocused -> Color.White
                 isActive -> AetherColors.CyberCyan
-                else -> Color(0xFF94A3B8)
+                else -> AetherColors.TextSecondary
             },
             fontSize = 10.sp,
             fontWeight = if (isFocused || isActive) FontWeight.Bold else FontWeight.Medium,
@@ -524,6 +594,9 @@ private fun RailIconButton(
     }
 }
 
+/**
+ * ZONE 2 ROW: 3-Tier "Obsidian Neon Glass" Custom D-Pad Focus Engine.
+ */
 @Composable
 private fun ObsidianCategoryRowItem(
     item: CockpitCategoryUiItem,
@@ -603,7 +676,7 @@ private fun ObsidianCategoryRowItem(
             color = when {
                 isFocused -> Color.White
                 isSelected -> AetherColors.IceBlue
-                else -> Color(0xFF94A3B8)
+                else -> AetherColors.TextSecondary
             },
             fontSize = 13.sp,
             fontWeight = when {
@@ -633,6 +706,7 @@ private fun ObsidianCategoryRowItem(
 fun TiviMateDetailsPanel(
     playerEngine: AetherVideoPlayerEngine,
     stream: StreamItemEntity?,
+    currentEpg: List<EpgProgramEntity>,
     modifier: Modifier = Modifier
 ) {
     val techMeta by playerEngine.techMetadata.collectAsState()
@@ -669,7 +743,7 @@ fun TiviMateDetailsPanel(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    if (stream.isFavorite) {
+                    if (stream.isQuickFavorite) {
                         Text(
                             text = "★ FAVORIT",
                             color = AetherColors.LaserAmber,
@@ -709,14 +783,21 @@ fun TiviMateDetailsPanel(
                     }
                 }
 
+                val epgNow = currentEpg.firstOrNull()
+                val descriptionText = when {
+                    !stream.plotDescription.isNullOrBlank() -> stream.plotDescription
+                    epgNow != null -> "EPG: ${epgNow.title} — ${epgNow.description ?: ""}"
+                    stream.sectionType == AetherSectionType.LIVE ->
+                        "Direkter Live-Stream • 1x OK = Mini-Player, 2x OK = Vollbild."
+                    stream.sectionType == AetherSectionType.VOD ->
+                        "On-Demand Kinofilm • 1x OK startet direkt im Pure Fullscreen (.mkv/.mp4/.ts Fallback)."
+                    else ->
+                        "On-Demand Serie • 1x OK öffnet die Staffel- und Episodenauswahl."
+                }
+
                 Text(
-                    text = stream.plot?.takeIf { it.isNotBlank() }
-                        ?: when (stream.sectionType) {
-                            AetherSectionType.LIVE -> "Direkter Live-Stream • 1x OK = Mini-Player, 2x OK = Vollbild."
-                            AetherSectionType.VOD -> "On-Demand Film • 1x OK startet direkt im Pure Fullscreen (.mkv/.mp4/.ts Fallback)."
-                            AetherSectionType.SERIES -> "Serie • 1x OK öffnet die Staffel- und Episodenauswahl."
-                        },
-                    color = Color(0xFFCBD5E1),
+                    text = descriptionText,
+                    color = AetherColors.TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     maxLines = 3,
@@ -755,9 +836,9 @@ fun TiviMateDetailsPanel(
             } else {
                 Text(
                     text = when (stream.sectionType) {
-                        AetherSectionType.VOD -> "Drücke [OK] für direkten Vollbild-Start"
-                        AetherSectionType.SERIES -> "Drücke [OK] für Episoden-Auswahl"
-                        AetherSectionType.LIVE -> "Drücke [OK] für Wiedergabe / Vollbild"
+                        AetherSectionType.VOD -> "Drücke [OK] für direkten Vollbild-Start • [MENÜ] für Ordner"
+                        AetherSectionType.SERIES -> "Drücke [OK] für Episoden-Auswahl • [MENÜ] für Ordner"
+                        AetherSectionType.LIVE -> "Drücke [OK] für Wiedergabe / Vollbild • [MENÜ] für Ordner"
                     },
                     color = AetherColors.CyberCyan.copy(alpha = 0.85f),
                     fontSize = 11.sp,
@@ -790,6 +871,7 @@ private fun Zone4MediaRowItem(
     onFocused: () -> Unit,
     onClickStream: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onOpenFolderModal: () -> Unit,
     onNavigateLeftToCategories: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
@@ -823,7 +905,7 @@ private fun Zone4MediaRowItem(
                     when (event.key) {
                         Key.DirectionLeft -> { onNavigateLeftToCategories(); true }
                         Key.DirectionCenter, Key.Enter -> { onClickStream(); true }
-                        Key.Menu, Key.Bookmark -> { onToggleFavorite(); true }
+                        Key.Menu, Key.Bookmark -> { onOpenFolderModal(); true }
                         else -> false
                     }
                 } else false
@@ -835,7 +917,7 @@ private fun Zone4MediaRowItem(
     ) {
         Text(
             text = "$indexNumber",
-            color = if (isFocused) AetherColors.CyberCyan else Color(0xFF64748B),
+            color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.width(42.dp)
@@ -880,7 +962,7 @@ private fun Zone4MediaRowItem(
                 color = when {
                     isFocused -> Color.White
                     isCurrentlyPlaying -> AetherColors.NeonEmerald
-                    else -> Color(0xFFE2E8F0)
+                    else -> AetherColors.TextPrimary
                 },
                 fontSize = 14.sp,
                 fontWeight = if (isFocused || isCurrentlyPlaying) FontWeight.Bold else FontWeight.Medium,
@@ -917,21 +999,25 @@ private fun Zone4MediaRowItem(
                 .padding(horizontal = 6.dp, vertical = 2.dp)
         ) {
             Text(
-                text = if (stream.isFavorite) "★" else "☆",
-                color = if (stream.isFavorite) AetherColors.LaserAmber else Color(0xFF64748B),
+                text = if (stream.isQuickFavorite) "★" else "☆",
+                color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary,
                 fontSize = 16.sp
             )
         }
     }
 }
 
+/**
+ * ISOLIERTE FULLSCREEN HUD OVERLAY KOMPONENTE (Zero-Recomposition Discipline).
+ */
 @Composable
 fun FullscreenPlayerHudOverlay(
     playerEngine: AetherVideoPlayerEngine,
     streamTitle: String,
     isCinemaMode: Boolean,
     currentPreset: StreamBufferPreset,
-    onApplyPreset: (StreamBufferPreset) -> Unit,
+    onCyclePreset: () -> Unit,
+    onZapChannelOffset: (Int) -> Unit,
     onExitFullscreen: () -> Unit
 ) {
     val currentPosMs by playerEngine.currentPositionMs.collectAsState()
@@ -973,6 +1059,14 @@ fun FullscreenPlayerHudOverlay(
                         }
                         Key.DirectionRight -> {
                             if (isCinemaMode) playerEngine.seekRelativeMs(15_000L)
+                            true
+                        }
+                        Key.DirectionUp, Key.ChannelUp -> {
+                            if (!isCinemaMode) onZapChannelOffset(-1)
+                            true
+                        }
+                        Key.DirectionDown, Key.ChannelDown -> {
+                            if (!isCinemaMode) onZapChannelOffset(1)
                             true
                         }
                         Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> {
@@ -1027,7 +1121,7 @@ fun FullscreenPlayerHudOverlay(
                             text = if (isCinemaMode) {
                                 "CINEMA FULLSCREEN • [LINKS/RECHTS] ±15s Spulen • [OK] Play/Pause • [ZURÜCK] Cockpit"
                             } else {
-                                "LIVE TV FULLSCREEN • [OK] Play/Pause • [ZURÜCK] Mini-Player Cockpit"
+                                "LIVE TV FULLSCREEN • [AUF/AB] Zapping • [OK] Play/Pause • [ZURÜCK] Mini-Player"
                             },
                             color = AetherColors.CyberCyan,
                             fontSize = 12.sp
@@ -1037,6 +1131,9 @@ fun FullscreenPlayerHudOverlay(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (techMeta.resolutionLabel.isNotBlank()) {
                             DetailBadge(techMeta.resolutionLabel, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
+                        }
+                        if (techMeta.fpsLabel.isNotBlank()) {
+                            DetailBadge(techMeta.fpsLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
                         }
                         if (techMeta.videoCodec.isNotBlank()) {
                             DetailBadge(techMeta.videoCodec, AetherColors.NeonEmerald.copy(alpha = 0.45f), AetherColors.NeonEmerald)
@@ -1081,236 +1178,38 @@ fun FullscreenPlayerHudOverlay(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            StreamBufferPreset.entries.forEach { preset ->
-                                val isPresetActive = preset == currentPreset
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isPresetActive) AetherColors.CyberCyan.copy(alpha = 0.22f) else AetherColors.DeepSpaceNavy)
-                                        .border(
-                                            width = 1.dp,
-                                            color = if (isPresetActive) AetherColors.CyberCyan else AetherColors.CyberCyan.copy(alpha = 0.35f),
-                                            shape = RoundedCornerShape(6.dp)
-                                        )
-                                        .clickable { onApplyPreset(preset) }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Text(
-                                        text = preset.name,
-                                        color = if (isPresetActive) AetherColors.CyberCyan else Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AetherColors.DeepSpaceNavy)
+                                .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                                .clickable { onCyclePreset() }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = "PUFFER: ${currentPreset.name}",
+                                color = AetherColors.CyberCyan,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (audioTracks.isNotEmpty()) {
                                 val activeAudio = audioTracks.firstOrNull { it.isSelected } ?: audioTracks.first()
-                                DetailBadge("🔊 ${activeAudio.label}", AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.IceBlue)
+                                DetailBadge(
+                                    text = "🔊 ${activeAudio.languageLabel} (${activeAudio.codecLabel})",
+                                    borderColor = AetherColors.CyberCyan.copy(alpha = 0.35f),
+                                    textColor = AetherColors.IceBlue
+                                )
                             }
                             if (subtitleTracks.isNotEmpty()) {
                                 val activeSub = subtitleTracks.firstOrNull { it.isSelected }
-                                DetailBadge("💬 ${activeSub?.label ?: "Aus"}", AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.IceBlue)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun AetherSeriesDetailModal(
-    seriesItem: StreamItemEntity,
-    episodes: List<SeriesEpisodeEntity>,
-    isLoading: Boolean,
-    onDismiss: () -> Unit,
-    onPlayEpisode: (SeriesEpisodeEntity) -> Unit
-) {
-    val seasons = remember(episodes) {
-        episodes.map { it.seasonNumber }.distinct().sorted()
-    }
-    var selectedSeason by remember(seasons) {
-        mutableIntStateOf(seasons.firstOrNull() ?: 1)
-    }
-    val seasonEpisodes = remember(episodes, selectedSeason) {
-        episodes.filter { it.seasonNumber == selectedSeason }.sortedBy { it.episodeNumber }
-    }
-
-    val closeFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        runCatching { closeFocusRequester.requestFocus() }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AetherColors.ObsidianBlack.copy(alpha = 0.88f))
-            .padding(32.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(16.dp))
-                .background(AetherColors.DeepSpaceNavy)
-                .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(seriesItem.name, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                    if (!seriesItem.plot.isNullOrBlank()) {
-                        Text(
-                            text = seriesItem.plot,
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 12.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                var isCloseFocused by remember { mutableStateOf(false) }
-                Box(
-                    modifier = Modifier
-                        .focusRequester(closeFocusRequester)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (isCloseFocused) AetherColors.CyberCyan.copy(alpha = 0.25f) else AetherColors.ObsidianBlack)
-                        .border(1.dp, if (isCloseFocused) AetherColors.CyberCyan else AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
-                        .onFocusChanged { isCloseFocused = it.isFocused }
-                        .focusable()
-                        .clickable { onDismiss() }
-                        .onKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && (event.key == Key.DirectionCenter || event.key == Key.Enter)) {
-                                onDismiss(); true
-                            } else false
-                        }
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                ) {
-                    Text("✕ Schließen", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            if (seasons.isNotEmpty()) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(seasons, key = { it }) { seasonNum ->
-                        var isTabFocused by remember { mutableStateOf(false) }
-                        val isSelected = seasonNum == selectedSeason
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    when {
-                                        isTabFocused -> AetherColors.CyberCyan.copy(alpha = 0.25f)
-                                        isSelected -> AetherColors.NeonEmerald.copy(alpha = 0.20f)
-                                        else -> AetherColors.ObsidianBlack
-                                    }
+                                DetailBadge(
+                                    text = "💬 ${activeSub?.languageLabel ?: "Aus"}",
+                                    borderColor = AetherColors.CyberCyan.copy(alpha = 0.35f),
+                                    textColor = AetherColors.IceBlue
                                 )
-                                .border(
-                                    width = 1.dp,
-                                    color = when {
-                                        isTabFocused -> AetherColors.CyberCyan
-                                        isSelected -> AetherColors.NeonEmerald
-                                        else -> AetherColors.CyberCyan.copy(alpha = 0.35f)
-                                    },
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .onFocusChanged { isTabFocused = it.isFocused }
-                                .focusable()
-                                .clickable { selectedSeason = seasonNum }
-                                .onKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown && (event.key == Key.DirectionCenter || event.key == Key.Enter)) {
-                                        selectedSeason = seasonNum; true
-                                    } else false
-                                }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                text = "Staffel $seasonNum",
-                                color = if (isSelected) AetherColors.NeonEmerald else Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                when {
-                    isLoading -> {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Lade Episoden vom Xtream-Server...", color = AetherColors.CyberCyan, fontSize = 15.sp)
-                        }
-                    }
-                    seasonEpisodes.isEmpty() -> {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Keine Episoden für diese Serie gefunden.", color = AetherColors.IceBlue, fontSize = 14.sp)
-                        }
-                    }
-                    else -> {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            items(seasonEpisodes, key = { it.episodeKey }) { ep ->
-                                var isEpFocused by remember { mutableStateOf(false) }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isEpFocused) AetherColors.CyberCyan.copy(alpha = 0.20f) else AetherColors.ObsidianBlack.copy(alpha = 0.6f))
-                                        .border(
-                                            width = if (isEpFocused) 1.5.dp else 1.dp,
-                                            color = if (isEpFocused) AetherColors.CyberCyan else AetherColors.CyberCyan.copy(alpha = 0.35f),
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .onFocusChanged { isEpFocused = it.isFocused }
-                                        .focusable()
-                                        .clickable { onPlayEpisode(ep) }
-                                        .onKeyEvent { event ->
-                                            if (event.type == KeyEventType.KeyDown && (event.key == Key.DirectionCenter || event.key == Key.Enter)) {
-                                                onPlayEpisode(ep); true
-                                            } else false
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "S${ep.seasonNumber} • E${ep.episodeNumber} — ${ep.title}",
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        if (ep.resumePositionMs > 0L) {
-                                            Text(
-                                                text = "▶ Fortsetzen bei ${formatMillisToTime(ep.resumePositionMs)}",
-                                                color = AetherColors.NeonEmerald,
-                                                fontSize = 11.sp
-                                            )
-                                        }
-                                    }
-
-                                    DetailBadge(
-                                        text = (ep.containerExtension ?: "mp4").uppercase(),
-                                        borderColor = AetherColors.NeonEmerald.copy(alpha = 0.45f),
-                                        textColor = AetherColors.NeonEmerald
-                                    )
-                                }
                             }
                         }
                     }
