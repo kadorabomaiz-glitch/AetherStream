@@ -55,6 +55,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
@@ -85,6 +86,9 @@ fun AetherApp(
     var isSearchModalVisible by remember { mutableStateOf(false) }
     var isLoadingCategoryStreams by remember { mutableStateOf(false) }
 
+    // Loop-Schutz: Verhindert Mehrfachabfragen für dieselbe Kategorie
+    val fetchedCategoryKeys = remember { mutableSetOf<String>() }
+
     val playlistId = activePlaylist?.id ?: 0L
 
     val favoriteFolders by remember(playlistId) {
@@ -96,7 +100,6 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // Deterministischer Kategorie-Reset beim Sektionswechsel
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
             val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
@@ -127,7 +130,6 @@ fun AetherApp(
         }
     }
 
-    // Zero-Stutter Gate während Fullscreen
     var streamsInSelectedCategory by remember { mutableStateOf<List<StreamItemEntity>>(emptyList()) }
     LaunchedEffect(rawStreamsFlow, isCinemaPlayerActive) {
         rawStreamsFlow.collect { updatedList ->
@@ -138,33 +140,37 @@ fun AetherApp(
     }
 
     // =========================================================================
-    // LEVEL-10 ON-DEMAND NACHLADER FÜR LEERE VOD- & SERIEN-KATEGORIEN
+    // ON-DEMAND NACHLADER (Entprellt & mit Doppelabfrage-Schutz)
     // =========================================================================
-    LaunchedEffect(selectedCategoryKey, selectedSection, visibleCategories) {
+    LaunchedEffect(selectedCategoryKey, selectedSection) {
         val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
             selectedCategoryKey == "SYS_RECENT" ||
             selectedCategoryKey.startsWith("FOLDER_")
 
         if (!isSystemCategory && selectedCategoryKey.isNotEmpty() && selectedSection != AetherSectionType.LIVE) {
-            val matchingCat = visibleCategories.firstOrNull { it.uniqueCategoryKey == selectedCategoryKey }
-            if (matchingCat != null) {
-                val streamCount = withContext(Dispatchers.IO) {
-                    dao.getStreamCountInCategory(matchingCat.uniqueCategoryKey)
-                }
-                if (streamCount == 0) {
-                    isLoadingCategoryStreams = true
-                    withContext(Dispatchers.IO) {
-                        runCatching {
-                            dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat)
-                        }
+            if (!fetchedCategoryKeys.contains(selectedCategoryKey)) {
+                val matchingCat = visibleCategories.firstOrNull { it.uniqueCategoryKey == selectedCategoryKey }
+                if (matchingCat != null) {
+                    val streamCount = withContext(Dispatchers.IO) {
+                        dao.getStreamCountInCategory(matchingCat.uniqueCategoryKey)
                     }
-                    isLoadingCategoryStreams = false
+                    if (streamCount == 0) {
+                        isLoadingCategoryStreams = true
+                        fetchedCategoryKeys.add(selectedCategoryKey)
+                        withContext(Dispatchers.IO) {
+                            runCatching {
+                                dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat)
+                            }
+                        }
+                        isLoadingCategoryStreams = false
+                    } else {
+                        fetchedCategoryKeys.add(selectedCategoryKey)
+                    }
                 }
             }
         }
     }
 
-    // Resume-Checkpoint Speicherung mit 95%-Abspann-Reset
     suspend fun persistVodOrSeriesCheckpoint() {
         if (!isCinemaPlayerActive) return
         val pos = playerEngine.currentPositionMs.value
@@ -195,7 +201,6 @@ fun AetherApp(
         }
     }
 
-    // 5-Sekunden-Ticker nur für VOD und Serien
     val isEnginePlaying by playerEngine.isPlaying.collectAsState()
     LaunchedEffect(isEnginePlaying, isCinemaPlayerActive, currentPlayingStream?.uniqueStreamKey, currentPlayingEpisode?.uniqueEpisodeKey) {
         if (isEnginePlaying && isCinemaPlayerActive) {
@@ -349,7 +354,7 @@ fun AetherApp(
         }
 
         // ============================================================
-        // MODALES SERIEN-COCKPIT (Volle 1080dp Breite ohne TV-Drosselung)
+        // MODALES SERIEN-COCKPIT (Volle 1080dp Breite)
         // ============================================================
         activeSeriesForModal?.let { seriesItem ->
             AetherSeriesDetailModal(
@@ -387,7 +392,7 @@ fun AetherApp(
         }
 
         // ============================================================
-        // GLOBALE SUCHE MODAL (300ms Debounce über Live, VOD & Serien)
+        // GLOBALE SUCHE MODAL (Performant auf Dispatchers.IO)
         // ============================================================
         if (isSearchModalVisible) {
             AetherGlobalSearchModal(
@@ -467,9 +472,6 @@ fun AetherApp(
     }
 }
 
-/**
- * Modales Serien-Cockpit: Durch usePlatformDefaultWidth = false auf volle 1080dp TV-Breite entfesselt!
- */
 @Composable
 private fun AetherSeriesDetailModal(
     seriesItem: StreamItemEntity,
@@ -504,7 +506,7 @@ private fun AetherSeriesDetailModal(
     val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
         val season = selectedSeason
         if (season != null) {
-            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
+            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season).flowOn(Dispatchers.IO)
         } else {
             flowOf(emptyList())
         }
@@ -527,7 +529,6 @@ private fun AetherSeriesDetailModal(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                // Linke Spalte: Details & Schließen
                 Column(
                     modifier = Modifier
                         .width(320.dp)
@@ -567,7 +568,6 @@ private fun AetherSeriesDetailModal(
                     }
                 }
 
-                // Rechte Spalte: Staffeln & Episoden
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -700,9 +700,6 @@ private fun AetherSeriesDetailModal(
     }
 }
 
-/**
- * Globales Such-Overlay (300ms Debounce über alle 3 Sektionen)
- */
 @Composable
 private fun AetherGlobalSearchModal(
     dao: AetherDao,
@@ -719,7 +716,7 @@ private fun AetherGlobalSearchModal(
     }
 
     LaunchedEffect(queryText) {
-        delay(300L)
+        delay(350L)
         debouncedQuery = queryText.trim()
     }
 
@@ -727,7 +724,7 @@ private fun AetherGlobalSearchModal(
         if (playlistId <= 0L || debouncedQuery.length < 2) {
             flowOf(emptyList())
         } else {
-            dao.searchVisibleStreams(playlistId, debouncedQuery)
+            dao.searchVisibleStreams(playlistId, debouncedQuery).flowOn(Dispatchers.IO)
         }
     }.collectAsState(initial = emptyList())
 
