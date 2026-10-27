@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -66,6 +67,7 @@ fun LiveTvDualCockpitScreen(
     activeSection: AetherSectionType = AetherSectionType.LIVE,
     startInPureFullscreen: Boolean = false,
     isVodOrSeriesMode: Boolean = false,
+    isLoadingStreams: Boolean = false,
     onSelectSection: (AetherSectionType) -> Unit = {},
     onSelectCategory: (String) -> Unit,
     onSelectStream: (StreamItemEntity) -> Unit,
@@ -89,7 +91,6 @@ fun LiveTvDualCockpitScreen(
     var focusedPreviewStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isPureFullscreen by remember { mutableStateOf(startInPureFullscreen) }
 
-    // Synchronisiert den Pure-Fullscreen-Start bei VOD & Serien-Episoden
     LaunchedEffect(startInPureFullscreen, currentPlayingStream?.uniqueStreamKey) {
         if (startInPureFullscreen && currentPlayingStream != null) {
             isPureFullscreen = true
@@ -156,9 +157,6 @@ fun LiveTvDualCockpitScreen(
             }
     ) {
         if (isPureFullscreen) {
-            // =========================================================================
-            // PURE FULLSCREEN STAGE (0ms Frame-Drop Übergang der AetherVideoSurface)
-            // =========================================================================
             Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
                 AetherVideoSurface(
                     engine = playerEngine,
@@ -179,9 +177,6 @@ fun LiveTvDualCockpitScreen(
                 )
             }
         } else {
-            // =========================================================================
-            // TIVIMATE 4-ZONEN 10-FOOT DUAL-COCKPIT
-            // =========================================================================
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -203,7 +198,7 @@ fun LiveTvDualCockpitScreen(
                     onOpenSettings = onOpenSettings
                 )
 
-                // ZONE 2: Obsidian Neon Glass Category Column (3-Tier D-Pad Engine)
+                // ZONE 2: Category Column
                 Column(
                     modifier = Modifier
                         .width(250.dp)
@@ -265,7 +260,6 @@ fun LiveTvDualCockpitScreen(
                                     if (focusedKey != selectedCategoryKey) {
                                         categoryScrubJob?.cancel()
                                         categoryScrubJob = coroutineScope.launch {
-                                            // 120ms Settle-Debounce für 60 FPS D-Pad Hold-Scrubbing
                                             delay(120L)
                                             onSelectCategory(focusedKey)
                                         }
@@ -293,14 +287,14 @@ fun LiveTvDualCockpitScreen(
                     }
                 }
 
-                // RECHTE BÜHNE: ZONE 3 (OBEN) + ZONE 4 (UNTEN)
+                // RECHTE BÜHNE: ZONE 3 + ZONE 4
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // ZONE 3: 16:9 Live Mini-Player + TiviMateDetailsPanel
+                    // ZONE 3: Mini-Player + TiviMateDetailsPanel
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -378,7 +372,7 @@ fun LiveTvDualCockpitScreen(
                         )
                     }
 
-                    // ZONE 4: Nummerierte Media-Liste (TV / VOD / SERIE)
+                    // ZONE 4: Media-Liste
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -388,7 +382,20 @@ fun LiveTvDualCockpitScreen(
                             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
                             .padding(8.dp)
                     ) {
-                        if (streamsInCategory.isEmpty()) {
+                        if (isLoadingStreams) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(color = AetherColors.CyberCyan, modifier = Modifier.size(36.dp))
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = "⚡ Lade Filme dieser Kategorie vom Server...",
+                                        color = AetherColors.CyberCyan,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        } else if (streamsInCategory.isEmpty()) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
                                     text = when (selectedCategoryKey) {
@@ -430,12 +437,10 @@ fun LiveTvDualCockpitScreen(
                                                     onOpenSeriesCockpit(stream)
                                                 }
                                                 AetherSectionType.VOD -> {
-                                                    // 1-Click Pure Fullscreen für VOD-Filme
                                                     isPureFullscreen = true
                                                     onSelectStream(stream)
                                                 }
                                                 AetherSectionType.LIVE -> {
-                                                    // 1. Klick = Mini-Player, 2. Klick auf denselben Sender = Vollbild
                                                     if (isPlayingThis) {
                                                         isPureFullscreen = true
                                                     } else {
@@ -594,9 +599,6 @@ private fun RailIconButton(
     }
 }
 
-/**
- * ZONE 2 ROW: 3-Tier "Obsidian Neon Glass" Custom D-Pad Focus Engine.
- */
 @Composable
 private fun ObsidianCategoryRowItem(
     item: CockpitCategoryUiItem,
@@ -754,6 +756,7 @@ fun TiviMateDetailsPanel(
                     }
                 }
 
+                // Badges-Leiste ohne vertikales Zusammenquetschen
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -778,6 +781,7 @@ fun TiviMateDetailsPanel(
                     if (techMeta.videoCodec.isNotBlank()) {
                         DetailBadge(techMeta.videoCodec, AetherColors.CyberCyan.copy(alpha = 0.35f), Color.White)
                     }
+                    // Gelbes Rating-Badge bleibt horizontal sauber fixiert
                     if (!stream.rating.isNullOrBlank() && stream.rating != "0") {
                         DetailBadge("★ ${stream.rating}", AetherColors.LaserAmber.copy(alpha = 0.5f), AetherColors.LaserAmber)
                     }
@@ -858,7 +862,14 @@ private fun DetailBadge(text: String, borderColor: Color, textColor: Color) {
             .border(1.dp, borderColor, RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
-        Text(text = text, color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text = text,
+            color = textColor,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }
 
@@ -941,7 +952,7 @@ private fun Zone4MediaRowItem(
                 .border(1.dp, badgeColor.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
                 .padding(horizontal = 6.dp, vertical = 2.dp)
         ) {
-            Text(text = badgeText, color = badgeColor, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text(text = badgeText, color = badgeColor, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
         }
 
         Spacer(modifier = Modifier.width(10.dp))
@@ -1007,9 +1018,6 @@ private fun Zone4MediaRowItem(
     }
 }
 
-/**
- * ISOLIERTE FULLSCREEN HUD OVERLAY KOMPONENTE (Zero-Recomposition Discipline).
- */
 @Composable
 fun FullscreenPlayerHudOverlay(
     playerEngine: AetherVideoPlayerEngine,
