@@ -55,7 +55,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
@@ -86,20 +85,20 @@ fun AetherApp(
     var isSearchModalVisible by remember { mutableStateOf(false) }
     var isLoadingCategoryStreams by remember { mutableStateOf(false) }
 
-    // Loop-Schutz: Verhindert Mehrfachabfragen für dieselbe Kategorie
     val fetchedCategoryKeys = remember { mutableSetOf<String>() }
-
     val playlistId = activePlaylist?.id ?: 0L
 
+    // Native Room-KMP Flows ohne schädliches flowOn(Dispatchers.IO)
     val favoriteFolders by remember(playlistId) {
-        if (playlistId > 0L) dao.observeFavoriteFolders(playlistId).flowOn(Dispatchers.IO) else flowOf(emptyList())
+        if (playlistId > 0L) dao.observeFavoriteFolders(playlistId) else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
     val visibleCategories by remember(playlistId, selectedSection) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection).flowOn(Dispatchers.IO)
+        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection)
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
+    // Automatische Anwahl der ersten Kategorie beim Start und Sektionswechsel
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
             val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
@@ -129,7 +128,7 @@ fun AetherApp(
                     dao.observeStreamsInFavoriteFolder(folderId)
                 }
                 else -> dao.observeVisibleStreamsInCategory(selectedCategoryKey)
-            }.flowOn(Dispatchers.IO)
+            }
         }
     }
 
@@ -260,7 +259,7 @@ fun AetherApp(
             }
 
             // ============================================================
-            // TIVIMATE 4-ZONEN DUAL COCKPIT (SOFORTSTART OHNE BLOCKIERUNG)
+            // TIVIMATE 4-ZONEN DUAL COCKPIT (SOFORTSTART MIT 0ms LATENZ)
             // ============================================================
             is AetherScreen.LiveTv, is AetherScreen.Dashboard, is AetherScreen.VodMovies, is AetherScreen.Series -> {
                 LiveTvDualCockpitScreen(
@@ -347,7 +346,7 @@ fun AetherApp(
         }
 
         // ============================================================
-        // MODALES SERIEN-COCKPIT (Volle 1080dp Breite)
+        // MODALES SERIEN-COCKPIT (Volle 1080dp TV-Breite)
         // ============================================================
         activeSeriesForModal?.let { seriesItem ->
             AetherSeriesDetailModal(
@@ -375,7 +374,7 @@ fun AetherApp(
         }
 
         // ============================================================
-        // GLOBALE SUCHE MODAL (Performant auf Dispatchers.IO)
+        // GLOBALE SUCHE MODAL (Natives Room-KMP)
         // ============================================================
         if (isSearchModalVisible) {
             AetherGlobalSearchModal(
@@ -489,7 +488,7 @@ private fun AetherSeriesDetailModal(
     val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
         val season = selectedSeason
         if (season != null) {
-            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season).flowOn(Dispatchers.IO)
+            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
         } else {
             flowOf(emptyList())
         }
@@ -707,7 +706,7 @@ private fun AetherGlobalSearchModal(
         if (playlistId <= 0L || debouncedQuery.length < 2) {
             flowOf(emptyList())
         } else {
-            dao.searchVisibleStreams(playlistId, debouncedQuery).flowOn(Dispatchers.IO)
+            dao.searchVisibleStreams(playlistId, debouncedQuery)
         }
     }.collectAsState(initial = emptyList())
 
