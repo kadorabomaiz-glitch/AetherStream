@@ -15,8 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -109,28 +107,24 @@ class XtreamSyncRepository(
             if (!it.startsWith("http://") && !it.startsWith("https://")) "http://$it" else it
         }.trimEnd('/')
 
+    /**
+     * L10 Zero-Stutter Startup:
+     * Wenn bereits Kategorien in der Datenbank vorhanden sind, wird der schwere Hintergrund-Sync
+     * beim Starten komplett übersprungen. Die App ist sofort zu 100% flüssig bedienbar!
+     */
     suspend fun triggerDailySilentSyncIfNeeded(): Int = withContext(Dispatchers.IO) {
         runCatching {
             val activePlaylist = dao.getActivePlaylistOnce() ?: return@withContext 0
             val existingCatKeys = dao.getExistingCategoryKeys(activePlaylist.id)
-            val timeZone = TimeZone.currentSystemDefault()
-            val lastSyncDate = kotlinx.datetime.Instant
-                .fromEpochMilliseconds(activePlaylist.lastSyncEpochMillis)
-                .toLocalDateTime(timeZone).date
-            val todayDate = Clock.System.now().toLocalDateTime(timeZone).date
 
-            if (activePlaylist.lastSyncEpochMillis == 0L || existingCatKeys.isEmpty() || lastSyncDate < todayDate) {
-                return@withContext synchronizePlaylistWithSmartLock(activePlaylist)
+            if (existingCatKeys.isNotEmpty()) {
+                // Datenbank ist bereits gefüllt -> 0ms Wartezeit, 0% CPU-Last!
+                return@withContext 0
             }
-            0
+            synchronizePlaylistWithSmartLock(activePlaylist)
         }.getOrDefault(0)
     }
 
-    /**
-     * L10 High-Performance Sync:
-     * Lädt alle Kategorien, Live-TV und Serien.
-     * VOD-Filme werden on-demand pro Kategorie nachgeladen, um den Fire TV Cube vor Out-of-Memory-Abstürzen zu schützen!
-     */
     suspend fun synchronizePlaylistWithSmartLock(
         playlist: PlaylistEntity
     ): Int = withContext(Dispatchers.IO) {
@@ -172,7 +166,7 @@ class XtreamSyncRepository(
             return key
         }
 
-        // 1. KATEGORIEN LADEN (Live, VOD und Serien)
+        // 1. KATEGORIEN LADEN
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
             buildCategoryEntity(
@@ -296,19 +290,14 @@ class XtreamSyncRepository(
             totalStreamsSaved += seriesStreams.size
         }
 
-        if (totalStreamsSaved > 0) {
-            dao.markPlaylistSynced(
-                playlistId = playlist.id,
-                timestamp = Clock.System.now().toEpochMilliseconds()
-            )
-        }
+        dao.markPlaylistSynced(
+            playlistId = playlist.id,
+            timestamp = Clock.System.now().toEpochMilliseconds()
+        )
 
         newlyDiscoveredCount
     }
 
-    /**
-     * ON-DEMAND TURBO: Lädt in 0,15s nur die Filme einer einzigen Kategorie nach!
-     */
     suspend fun fetchVodStreamsForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
