@@ -146,10 +146,8 @@ class AndroidMedia3PlayerEngine(
                 val candidateUrl = buildSmartFallbackUrl(baseUrl, reconnectCount)
 
                 scope.launch {
-                    delay(400L * reconnectCount)
+                    delay(300L * reconnectCount)
                     runCatching {
-                        exoPlayer.stop()
-                        exoPlayer.clearMediaItems()
                         exoPlayer.setMediaItem(MediaItem.fromUri(candidateUrl), lastKnownPos)
                         exoPlayer.prepare()
                         exoPlayer.play()
@@ -164,7 +162,7 @@ class AndroidMedia3PlayerEngine(
 
     /**
      * L10 Smart-Container Rotation:
-     * - Live TV bleibt unangetastet.
+     * - Live TV bleibt unberührt.
      * - Bei VOD/Filmen wird bei Fehlern automatisch zwischen .mp4, .mkv, .avi und .ts rotiert.
      * - Bei Versuch 5 wird für 24/7-Sender in VOD die /live/...ts Route getestet.
      */
@@ -199,16 +197,17 @@ class AndroidMedia3PlayerEngine(
             .setReadTimeoutMs(25_000)
             .setKeepPostFor302Redirects(true)
 
-        // Bewährte Standard MediaSourceFactory für universelle VBR/CBR-Wiedergabe (Live, Serie, VOD)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
 
+        // Sub-Second Zapping: First-Frame-Puffer auf 500ms gesenkt für blitzschnellen Start!
+        val fastStartBufferMs = 500
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 preset.minBufferMs,
                 preset.maxBufferMs,
-                preset.playbackStartBufferMs,
-                preset.playbackStartBufferMs
+                fastStartBufferMs,
+                1500
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -227,6 +226,9 @@ class AndroidMedia3PlayerEngine(
             }
     }
 
+    /**
+     * Nahtloser Stream-Wechsel ohne blockierenden stop() / clearMediaItems() Surface-Flush!
+     */
     override fun playStream(url: String, startPositionMs: Long) {
         val cleanUrl = url.trim()
         if (cleanUrl.isEmpty()) return
@@ -236,8 +238,6 @@ class AndroidMedia3PlayerEngine(
         _currentPositionMs.value = startPositionMs
 
         runCatching {
-            exoPlayer.stop()
-            exoPlayer.clearMediaItems()
             exoPlayer.setMediaItem(MediaItem.fromUri(cleanUrl), startPositionMs)
             exoPlayer.prepare()
             exoPlayer.play()
