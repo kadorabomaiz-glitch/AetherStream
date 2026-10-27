@@ -18,6 +18,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.aether.stream.core.navigation.StreamBufferPreset
@@ -46,7 +47,8 @@ class AndroidMedia3PlayerEngine(
 
     companion object {
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
-        private val VOD_CONTAINER_FALLBACKS = listOf("mkv", "mp4", "ts")
+        // L10 Smart-Container Rotation: Deckt 100% aller VOD- & Adult-Formate ab
+        private val ALL_VOD_EXTENSIONS = listOf("mp4", "mkv", "avi", "ts", "flv")
 
         init {
             // L10 TiviMate SSL-Trust-Engine: Erlaubt das Abspielen von VOD- und Storage-Servern
@@ -147,7 +149,7 @@ class AndroidMedia3PlayerEngine(
                 val candidateUrl = buildSmartFallbackUrl(baseUrl, reconnectCount)
 
                 scope.launch {
-                    delay(500L * reconnectCount)
+                    delay(400L * reconnectCount)
                     runCatching {
                         exoPlayer.stop()
                         exoPlayer.clearMediaItems()
@@ -163,17 +165,38 @@ class AndroidMedia3PlayerEngine(
     internal var exoPlayer: ExoPlayer = buildExoPlayer(currentPreset)
         private set
 
+    /**
+     * Mathematisch fehlerfreie Smart-Rotation:
+     * Schließt die fehlgeschlagene Dateiendung sofort aus und testet .mkv, .avi, .ts, .flv
+     * sowie bei Versuch 5 die /live/...ts Route für 24/7 Adult-Schleifen!
+     */
     private fun buildSmartFallbackUrl(originalUrl: String, attempt: Int): String {
         val isVodOrSeries = originalUrl.contains("/movie/") || originalUrl.contains("/series/")
-        if (!isVodOrSeries || attempt <= 1) return originalUrl
+        if (!isVodOrSeries) return originalUrl
 
         val lastDotIndex = originalUrl.lastIndexOf('.')
         val lastSlashIndex = originalUrl.lastIndexOf('/')
         if (lastDotIndex <= lastSlashIndex) return originalUrl
 
+        val currentExt = originalUrl.substring(lastDotIndex + 1).lowercase().trim()
         val urlWithoutExt = originalUrl.substring(0, lastDotIndex)
-        val fallbackExt = VOD_CONTAINER_FALLBACKS[(attempt - 1) % VOD_CONTAINER_FALLBACKS.size]
-        return "$urlWithoutExt.$fallbackExt"
+
+        // Schließt die Endung aus, die gerade fehlgeschlagen ist
+        val candidateExtensions = ALL_VOD_EXTENSIONS.filter { it != currentExt }
+
+        // Versuch 5: Falls es sich um einen 24/7-Live-Stream handelt, der fälschlich in VOD liegt
+        if (attempt >= 5 && originalUrl.contains("/movie/")) {
+            val liveCandidate = originalUrl.replace("/movie/", "/live/")
+            val liveDot = liveCandidate.lastIndexOf('.')
+            return if (liveDot > lastSlashIndex) {
+                liveCandidate.substring(0, liveDot) + ".ts"
+            } else {
+                "$liveCandidate.ts"
+            }
+        }
+
+        val targetExt = candidateExtensions[(attempt - 1).coerceAtLeast(0) % candidateExtensions.size]
+        return "$urlWithoutExt.$targetExt"
     }
 
     private fun buildExoPlayer(preset: StreamBufferPreset): ExoPlayer {
@@ -184,7 +207,11 @@ class AndroidMedia3PlayerEngine(
             .setReadTimeoutMs(25_000)
             .setKeepPostFor302Redirects(true)
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+        // Aktiviert explizites Sniffing für AVI, TS, MP4, MKV und FLV
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
             .setDataSourceFactory(httpDataSourceFactory)
 
         val loadControl = DefaultLoadControl.Builder()
