@@ -92,11 +92,11 @@ fun AetherApp(
     val playlistId = activePlaylist?.id ?: 0L
 
     val favoriteFolders by remember(playlistId) {
-        if (playlistId > 0L) dao.observeFavoriteFolders(playlistId) else flowOf(emptyList())
+        if (playlistId > 0L) dao.observeFavoriteFolders(playlistId).flowOn(Dispatchers.IO) else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
     val visibleCategories by remember(playlistId, selectedSection) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection)
+        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection).flowOn(Dispatchers.IO)
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
@@ -116,17 +116,20 @@ fun AetherApp(
     }
 
     val rawStreamsFlow = remember(playlistId, selectedSection, selectedCategoryKey) {
-        when {
-            playlistId == 0L || selectedCategoryKey.isEmpty() -> flowOf(emptyList())
-            selectedCategoryKey == "SYS_RECENT" ->
-                dao.observeRecentlyWatched(playlistId, selectedSection)
-            selectedCategoryKey == "SYS_QUICK_FAV" ->
-                dao.observeQuickFavorites(playlistId, selectedSection)
-            selectedCategoryKey.startsWith("FOLDER_") -> {
-                val folderId = selectedCategoryKey.removePrefix("FOLDER_").toLongOrNull() ?: 0L
-                dao.observeStreamsInFavoriteFolder(folderId)
-            }
-            else -> dao.observeVisibleStreamsInCategory(selectedCategoryKey)
+        if (playlistId <= 0L || selectedCategoryKey.isEmpty()) {
+            flowOf(emptyList())
+        } else {
+            when {
+                selectedCategoryKey == "SYS_RECENT" ->
+                    dao.observeRecentlyWatched(playlistId, selectedSection)
+                selectedCategoryKey == "SYS_QUICK_FAV" ->
+                    dao.observeQuickFavorites(playlistId, selectedSection)
+                selectedCategoryKey.startsWith("FOLDER_") -> {
+                    val folderId = selectedCategoryKey.removePrefix("FOLDER_").toLongOrNull() ?: 0L
+                    dao.observeStreamsInFavoriteFolder(folderId)
+                }
+                else -> dao.observeVisibleStreamsInCategory(selectedCategoryKey)
+            }.flowOn(Dispatchers.IO)
         }
     }
 
@@ -139,9 +142,7 @@ fun AetherApp(
         }
     }
 
-    // =========================================================================
-    // ON-DEMAND NACHLADER (Entprellt & mit Doppelabfrage-Schutz)
-    // =========================================================================
+    // On-Demand VOD- & Serien-Nachlader
     LaunchedEffect(selectedCategoryKey, selectedSection) {
         val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
             selectedCategoryKey == "SYS_RECENT" ||
@@ -201,6 +202,7 @@ fun AetherApp(
         }
     }
 
+    // 5-Sekunden-Ticker nur für VOD und Serien
     val isEnginePlaying by playerEngine.isPlaying.collectAsState()
     LaunchedEffect(isEnginePlaying, isCinemaPlayerActive, currentPlayingStream?.uniqueStreamKey, currentPlayingEpisode?.uniqueEpisodeKey) {
         if (isEnginePlaying && isCinemaPlayerActive) {
@@ -258,7 +260,7 @@ fun AetherApp(
             }
 
             // ============================================================
-            // TIVIMATE 4-ZONEN DUAL COCKPIT
+            // TIVIMATE 4-ZONEN DUAL COCKPIT (SOFORTSTART OHNE BLOCKIERUNG)
             // ============================================================
             is AetherScreen.LiveTv, is AetherScreen.Dashboard, is AetherScreen.VodMovies, is AetherScreen.Series -> {
                 LiveTvDualCockpitScreen(
@@ -283,22 +285,13 @@ fun AetherApp(
                     },
                     onSelectCategory = { selectedCategoryKey = it },
                     onSelectStream = { stream ->
+                        // L10 SOFORTSTART: 0ms Datenbank-Latenz, kein blockierender Write!
                         currentPlayingEpisode = null
                         currentPlayingStream = stream
                         val isVod = (stream.sectionType == AetherSectionType.VOD)
                         isCinemaPlayerActive = isVod
                         val startPos = if (isVod) stream.resumePositionMs.coerceAtLeast(0L) else 0L
                         playerEngine.playStream(stream.streamUrl, startPos)
-
-                        scope.launch(Dispatchers.IO) {
-                            val now = Clock.System.now().toEpochMilliseconds()
-                            dao.updateWatchProgress(
-                                uniqueStreamKey = stream.uniqueStreamKey,
-                                positionMs = stream.resumePositionMs,
-                                durationMs = stream.totalDurationMs,
-                                watchedAt = now
-                            )
-                        }
                     },
                     onOpenSeriesCockpit = { seriesItem ->
                         activeSeriesForModal = seriesItem
@@ -376,16 +369,6 @@ fun AetherApp(
                     )
                     val startPos = if (resume) episode.resumePositionMs.coerceAtLeast(0L) else 0L
                     playerEngine.playStream(episode.streamUrl, startPos)
-
-                    scope.launch(Dispatchers.IO) {
-                        val now = Clock.System.now().toEpochMilliseconds()
-                        dao.updateWatchProgress(
-                            uniqueStreamKey = seriesItem.uniqueStreamKey,
-                            positionMs = startPos,
-                            durationMs = episode.durationMs,
-                            watchedAt = now
-                        )
-                    }
                 },
                 onDismiss = { activeSeriesForModal = null }
             )
