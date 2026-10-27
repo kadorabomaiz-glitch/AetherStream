@@ -2,17 +2,9 @@ package com.aether.stream
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -20,21 +12,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.aether.stream.core.navigation.AetherNavigationViewModel
 import com.aether.stream.core.navigation.AetherScreen
 import com.aether.stream.core.navigation.StreamBufferPreset
@@ -44,6 +37,7 @@ import com.aether.stream.core.theme.AetherTheme
 import com.aether.stream.core.ui.AetherFocusableGlassCard
 import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
+import com.aether.stream.data.local.CategoryEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.FavoriteFolderMappingEntity
 import com.aether.stream.data.local.PlaylistEntity
@@ -88,6 +82,9 @@ fun AetherApp(
     var isCinemaPlayerActive by remember { mutableStateOf(false) }
     var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
 
+    var isSearchModalVisible by remember { mutableStateOf(false) }
+    var isLoadingCategoryStreams by remember { mutableStateOf(false) }
+
     val playlistId = activePlaylist?.id ?: 0L
 
     val favoriteFolders by remember(playlistId) {
@@ -99,7 +96,7 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // Deterministischer Kategorie-Reset beim Sektionswechsel (LIVE <-> VOD <-> SERIES)
+    // Deterministischer Kategorie-Reset beim Sektionswechsel
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
             val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
@@ -130,7 +127,7 @@ fun AetherApp(
         }
     }
 
-    // Zero-Stutter Gate: Unterdrückt Listen-Re-Renders im Hintergrund während VOD/Serien im Vollbild laufen
+    // Zero-Stutter Gate während Fullscreen
     var streamsInSelectedCategory by remember { mutableStateOf<List<StreamItemEntity>>(emptyList()) }
     LaunchedEffect(rawStreamsFlow, isCinemaPlayerActive) {
         rawStreamsFlow.collect { updatedList ->
@@ -140,7 +137,34 @@ fun AetherApp(
         }
     }
 
-    // Hilfsfunktion für performantes Speichern auf Dispatchers.IO inkl. 95%-Abspann-Reset
+    // =========================================================================
+    // LEVEL-10 ON-DEMAND NACHLADER FÜR LEERE VOD- & SERIEN-KATEGORIEN
+    // =========================================================================
+    LaunchedEffect(selectedCategoryKey, selectedSection, visibleCategories) {
+        val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
+            selectedCategoryKey == "SYS_RECENT" ||
+            selectedCategoryKey.startsWith("FOLDER_")
+
+        if (!isSystemCategory && selectedCategoryKey.isNotEmpty() && selectedSection != AetherSectionType.LIVE) {
+            val matchingCat = visibleCategories.firstOrNull { it.uniqueCategoryKey == selectedCategoryKey }
+            if (matchingCat != null) {
+                val streamCount = withContext(Dispatchers.IO) {
+                    dao.getStreamCountInCategory(matchingCat.uniqueCategoryKey)
+                }
+                if (streamCount == 0) {
+                    isLoadingCategoryStreams = true
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat)
+                        }
+                    }
+                    isLoadingCategoryStreams = false
+                }
+            }
+        }
+    }
+
+    // Resume-Checkpoint Speicherung mit 95%-Abspann-Reset
     suspend fun persistVodOrSeriesCheckpoint() {
         if (!isCinemaPlayerActive) return
         val pos = playerEngine.currentPositionMs.value
@@ -171,7 +195,7 @@ fun AetherApp(
         }
     }
 
-    // L10-Schutz: Speichert den Fortschritt alle 5s NUR bei VOD und Serien (Niemals bei Live-TV!)
+    // 5-Sekunden-Ticker nur für VOD und Serien
     val isEnginePlaying by playerEngine.isPlaying.collectAsState()
     LaunchedEffect(isEnginePlaying, isCinemaPlayerActive, currentPlayingStream?.uniqueStreamKey, currentPlayingEpisode?.uniqueEpisodeKey) {
         if (isEnginePlaying && isCinemaPlayerActive) {
@@ -229,7 +253,7 @@ fun AetherApp(
             }
 
             // ============================================================
-            // TIVIMATE 4-ZONEN DUAL COCKPIT (LIVE TV, VOD MOVIES & SERIEN)
+            // TIVIMATE 4-ZONEN DUAL COCKPIT
             // ============================================================
             is AetherScreen.LiveTv, is AetherScreen.Dashboard, is AetherScreen.VodMovies, is AetherScreen.Series -> {
                 LiveTvDualCockpitScreen(
@@ -245,6 +269,7 @@ fun AetherApp(
                     activeSection = selectedSection,
                     startInPureFullscreen = isCinemaPlayerActive,
                     isVodOrSeriesMode = selectedSection != AetherSectionType.LIVE,
+                    isLoadingStreams = isLoadingCategoryStreams,
                     onSelectSection = { section ->
                         if (selectedSection != section) {
                             selectedSection = section
@@ -260,7 +285,6 @@ fun AetherApp(
                         val startPos = if (isVod) stream.resumePositionMs.coerceAtLeast(0L) else 0L
                         playerEngine.playStream(stream.streamUrl, startPos)
 
-                        // Markiert den Stream in "Zuletzt gesehen" (SYS_RECENT) auf Dispatchers.IO
                         scope.launch(Dispatchers.IO) {
                             val now = Clock.System.now().toEpochMilliseconds()
                             dao.updateWatchProgress(
@@ -286,7 +310,7 @@ fun AetherApp(
                         navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
                     },
                     onOpenSearch = {
-                        // Bereit für Phase 2 Schritt 2 (Globale Suche)
+                        isSearchModalVisible = true
                     },
                     onToggleLayoutMode = navigationViewModel::toggleLiveTvLayoutMode,
                     onCycleBufferPreset = {
@@ -325,7 +349,7 @@ fun AetherApp(
         }
 
         // ============================================================
-        // MODALES SERIEN-COCKPIT (Staffel- & Episodenauswahl)
+        // MODALES SERIEN-COCKPIT (Volle 1080dp Breite ohne TV-Drosselung)
         // ============================================================
         activeSeriesForModal?.let { seriesItem ->
             AetherSeriesDetailModal(
@@ -348,7 +372,6 @@ fun AetherApp(
                     val startPos = if (resume) episode.resumePositionMs.coerceAtLeast(0L) else 0L
                     playerEngine.playStream(episode.streamUrl, startPos)
 
-                    // Aktualisiert auch die Hauptserie für "Zuletzt gesehen" (SYS_RECENT)
                     scope.launch(Dispatchers.IO) {
                         val now = Clock.System.now().toEpochMilliseconds()
                         dao.updateWatchProgress(
@@ -360,6 +383,37 @@ fun AetherApp(
                     }
                 },
                 onDismiss = { activeSeriesForModal = null }
+            )
+        }
+
+        // ============================================================
+        // GLOBALE SUCHE MODAL (300ms Debounce über Live, VOD & Serien)
+        // ============================================================
+        if (isSearchModalVisible) {
+            AetherGlobalSearchModal(
+                dao = dao,
+                playlistId = playlistId,
+                onDismiss = { isSearchModalVisible = false },
+                onSelectStream = { stream ->
+                    isSearchModalVisible = false
+                    when (stream.sectionType) {
+                        AetherSectionType.SERIES -> {
+                            activeSeriesForModal = stream
+                        }
+                        AetherSectionType.VOD -> {
+                            currentPlayingEpisode = null
+                            currentPlayingStream = stream
+                            isCinemaPlayerActive = true
+                            playerEngine.playStream(stream.streamUrl, stream.resumePositionMs.coerceAtLeast(0L))
+                        }
+                        AetherSectionType.LIVE -> {
+                            currentPlayingEpisode = null
+                            currentPlayingStream = stream
+                            isCinemaPlayerActive = false
+                            playerEngine.playStream(stream.streamUrl, 0L)
+                        }
+                    }
+                }
             )
         }
 
@@ -413,6 +467,9 @@ fun AetherApp(
     }
 }
 
+/**
+ * Modales Serien-Cockpit: Durch usePlatformDefaultWidth = false auf volle 1080dp TV-Breite entfesselt!
+ */
 @Composable
 private fun AetherSeriesDetailModal(
     seriesItem: StreamItemEntity,
@@ -453,11 +510,14 @@ private fun AetherSeriesDetailModal(
         }
     }.collectAsState(initial = emptyList())
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Box(
             modifier = Modifier
-                .width(960.dp)
-                .height(580.dp)
+                .width(1080.dp)
+                .height(620.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .background(AetherColors.DeepSpaceNavy)
                 .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
@@ -467,16 +527,20 @@ private fun AetherSeriesDetailModal(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
+                // Linke Spalte: Details & Schließen
                 Column(
                     modifier = Modifier
-                        .width(300.dp)
+                        .width(320.dp)
                         .fillMaxHeight(),
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column {
                         Text(
                             text = seriesItem.name,
-                            style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan),
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                color = AetherColors.CyberCyan,
+                                fontWeight = FontWeight.Bold
+                            ),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -488,7 +552,7 @@ private fun AetherSeriesDetailModal(
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = seriesItem.plotDescription ?: "Keine Inhaltsangabe verfügbar.",
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary),
                             maxLines = 8,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -497,12 +561,13 @@ private fun AetherSeriesDetailModal(
                     AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 10.dp) {
                         Text(
                             text = "SCHLIESSEN ✕",
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                         )
                     }
                 }
 
+                // Rechte Spalte: Staffeln & Episoden
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -514,7 +579,7 @@ private fun AetherSeriesDetailModal(
                                 CircularProgressIndicator(color = AetherColors.CyberCyan)
                                 Spacer(modifier = Modifier.height(16.dp))
                                 Text(
-                                    text = "Lade Staffeln & Episoden...",
+                                    text = "Lade Staffeln & Episoden vom Xtream-Server...",
                                     style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
                                 )
                             }
@@ -523,7 +588,7 @@ private fun AetherSeriesDetailModal(
                         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                             Text(
                                 text = "Keine Episoden für diese Serie gefunden.",
-                                style = MaterialTheme.typography.bodyMedium
+                                style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary)
                             )
                         }
                     } else {
@@ -541,7 +606,8 @@ private fun AetherSeriesDetailModal(
                                     Text(
                                         text = "Staffel $seasonNum",
                                         style = MaterialTheme.typography.titleMedium.copy(
-                                            color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary
+                                            color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary,
+                                            fontWeight = FontWeight.Bold
                                         ),
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
@@ -575,7 +641,8 @@ private fun AetherSeriesDetailModal(
                                             Text(
                                                 text = "Folge ${ep.episodeNumber}: ${ep.title}",
                                                 style = MaterialTheme.typography.titleMedium.copy(
-                                                    color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary
+                                                    color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary,
+                                                    fontWeight = FontWeight.Bold
                                                 ),
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
@@ -604,14 +671,204 @@ private fun AetherSeriesDetailModal(
                                             }
                                         }
 
-                                        Spacer(modifier = Modifier.width(14.dp))
+                                        Spacer(modifier = Modifier.width(16.dp))
 
-                                        Text(
-                                            text = if (hasResume) "▶️ Fortsetzen" else "▶️ Abspielen",
-                                            style = MaterialTheme.typography.labelSmall.copy(
-                                                color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(
+                                                    if (hasResume) AetherColors.NeonEmerald.copy(alpha = 0.2f)
+                                                    else AetherColors.CyberCyan.copy(alpha = 0.2f)
+                                                )
+                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (hasResume) "▶ Fortsetzen" else "▶ Abspielen",
+                                                color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
                                             )
-                                        )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Globales Such-Overlay (300ms Debounce über alle 3 Sektionen)
+ */
+@Composable
+private fun AetherGlobalSearchModal(
+    dao: AetherDao,
+    playlistId: Long,
+    onDismiss: () -> Unit,
+    onSelectStream: (StreamItemEntity) -> Unit
+) {
+    var queryText by remember { mutableStateOf("") }
+    var debouncedQuery by remember { mutableStateOf("") }
+
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    LaunchedEffect(queryText) {
+        delay(300L)
+        debouncedQuery = queryText.trim()
+    }
+
+    val searchResults by remember(playlistId, debouncedQuery) {
+        if (playlistId <= 0L || debouncedQuery.length < 2) {
+            flowOf(emptyList())
+        } else {
+            dao.searchVisibleStreams(playlistId, debouncedQuery)
+        }
+    }.collectAsState(initial = emptyList())
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(960.dp)
+                .height(600.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(AetherColors.DeepSpaceNavy)
+                .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
+                .padding(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "GLOBALE SUCHE (LIVE TV, VOD & SERIEN)",
+                        color = AetherColors.CyberCyan,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+
+                    AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 8.dp) {
+                        Text(
+                            text = "SCHLIESSEN ✕",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = queryText,
+                    onValueChange = { queryText = it },
+                    label = { Text("Titel oder Kanal suchen...") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester),
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedContainerColor = AetherColors.ObsidianBlack,
+                        unfocusedContainerColor = AetherColors.ObsidianBlack
+                    )
+                )
+
+                Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    when {
+                        debouncedQuery.length < 2 -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "Gib mindestens 2 Zeichen ein, um zu suchen.",
+                                    color = AetherColors.TextSecondary,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                        searchResults.isEmpty() -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "Keine Treffer für „$debouncedQuery“ gefunden.",
+                                    color = AetherColors.IceBlue,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                        else -> {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(searchResults, key = { it.uniqueStreamKey }) { item ->
+                                    AetherFocusableGlassCard(
+                                        onClick = { onSelectStream(item) },
+                                        cornerRadius = 8.dp,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { isFocused ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                val (tag, tagColor) = when (item.sectionType) {
+                                                    AetherSectionType.LIVE -> "TV" to AetherColors.CyberCyan
+                                                    AetherSectionType.VOD -> "VOD" to AetherColors.NeonEmerald
+                                                    AetherSectionType.SERIES -> "SERIE" to AetherColors.LaserAmber
+                                                }
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(4.dp))
+                                                        .background(tagColor.copy(alpha = 0.2f))
+                                                        .border(1.dp, tagColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = tag,
+                                                        color = tagColor,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.ExtraBold
+                                                    )
+                                                }
+
+                                                Spacer(modifier = Modifier.width(10.dp))
+
+                                                Text(
+                                                    text = item.name,
+                                                    color = if (isFocused) Color.White else AetherColors.TextPrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+
+                                            Text(
+                                                text = "▶ Starten",
+                                                color = AetherColors.CyberCyan,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
                                 }
                             }
