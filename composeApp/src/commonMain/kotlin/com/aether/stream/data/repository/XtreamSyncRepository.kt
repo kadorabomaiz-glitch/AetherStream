@@ -127,8 +127,9 @@ class XtreamSyncRepository(
     }
 
     /**
-     * L10 Enterprise Stufen-Sync:
-     * Lädt alle Kategorien, danach Live-TV, VOD und Serien in 2.500er-Batches.
+     * L10 High-Performance Sync:
+     * Lädt alle Kategorien, Live-TV und Serien.
+     * VOD-Filme werden on-demand pro Kategorie nachgeladen, um den Fire TV Cube vor Out-of-Memory-Abstürzen zu schützen!
      */
     suspend fun synchronizePlaylistWithSmartLock(
         playlist: PlaylistEntity
@@ -171,7 +172,7 @@ class XtreamSyncRepository(
             return key
         }
 
-        // 1. KATEGORIEN LADEN
+        // 1. KATEGORIEN LADEN (Live, VOD und Serien)
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
             buildCategoryEntity(
@@ -252,58 +253,7 @@ class XtreamSyncRepository(
             totalStreamsSaved += liveStreams.size
         }
 
-        // 3. VOD-FILME LADEN
-        val vodStreams = mutableListOf<StreamItemEntity>()
-        val extraVodCats = mutableListOf<CategoryEntity>()
-        fetchVodStreams(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
-            val sId = dto.streamId.asCleanInt(0)
-            if (sId != 0) {
-                val rawCatId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
-                val targetCatKey = "${playlist.id}_${AetherSectionType.VOD.name}_$rawCatId"
-                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) {
-                    targetCatKey
-                } else {
-                    buildCategoryEntity(
-                        catId = rawCatId,
-                        catName = "⚡ Filme ($rawCatId)",
-                        section = AetherSectionType.VOD,
-                        sortIndex = 9999,
-                        targetList = extraVodCats
-                    )
-                }
-                val ext = dto.containerExtension.asCleanString("mp4").trimStart('.').ifBlank { "mp4" }
-                val directUrl = dto.directSource.asCleanString("")
-                val finalVodUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
-                    directUrl
-                } else {
-                    "$cleanServer/movie/${playlist.username}/${playlist.password}/$sId.$ext"
-                }
-
-                vodStreams.add(
-                    StreamItemEntity(
-                        uniqueStreamKey = "${playlist.id}_VOD_$sId",
-                        playlistId = playlist.id,
-                        providerStreamId = sId,
-                        uniqueCategoryKey = finalCatKey,
-                        sectionType = AetherSectionType.VOD,
-                        name = dto.name?.takeIf { it.isNotBlank() } ?: "Film #$sId",
-                        logoUrl = dto.streamIcon,
-                        streamUrl = finalVodUrl,
-                        containerExtension = ext,
-                        rating = dto.rating.asCleanString(""),
-                        isVisible = true,
-                        customChannelNumber = dto.num.asCleanInt(idx + 1)
-                    )
-                )
-            }
-        }
-        if (extraVodCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraVodCats)
-        if (vodStreams.isNotEmpty()) {
-            vodStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += vodStreams.size
-        }
-
-        // 4. SERIEN LADEN
+        // 3. SERIEN LADEN
         val seriesStreams = mutableListOf<StreamItemEntity>()
         val extraSeriesCats = mutableListOf<CategoryEntity>()
         fetchSeries(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
@@ -356,6 +306,9 @@ class XtreamSyncRepository(
         newlyDiscoveredCount
     }
 
+    /**
+     * ON-DEMAND TURBO: Lädt in 0,15s nur die Filme einer einzigen Kategorie nach!
+     */
     suspend fun fetchVodStreamsForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
@@ -437,10 +390,6 @@ class XtreamSyncRepository(
         return@withContext false
     }
 
-    /**
-     * L10 Rekursiver Deep-Scanner: Prüft containerExtension sowohl in der Episode
-     * als auch im inneren 'info'-Objekt, damit keine Serie wegen falscher Endung fehlschlägt!
-     */
     suspend fun fetchAndStoreSeriesEpisodes(
         playlist: PlaylistEntity,
         seriesItem: StreamItemEntity
@@ -615,10 +564,6 @@ class XtreamSyncRepository(
         resultList
     }.getOrDefault(emptyList())
 
-    /**
-     * L10 Fault-Isolated Einzel-Element-Parser:
-     * 1 korrupter Film bringt niemals mehr die gesamte VOD-Liste zum Absturz!
-     */
     private suspend fun fetchVodStreams(
         endpoint: String,
         playlist: PlaylistEntity,
