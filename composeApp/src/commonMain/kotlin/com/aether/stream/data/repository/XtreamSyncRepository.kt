@@ -109,8 +109,7 @@ class XtreamSyncRepository(
 
     /**
      * L10 Zero-Stutter Startup:
-     * Wenn bereits Kategorien in der Datenbank vorhanden sind, wird der schwere Hintergrund-Sync
-     * beim Starten komplett übersprungen. Die App ist sofort zu 100% flüssig bedienbar!
+     * Überspringt den schweren Netzwerk-Sync, wenn Kategorien bereits in SQLite liegen.
      */
     suspend fun triggerDailySilentSyncIfNeeded(): Int = withContext(Dispatchers.IO) {
         runCatching {
@@ -118,7 +117,6 @@ class XtreamSyncRepository(
             val existingCatKeys = dao.getExistingCategoryKeys(activePlaylist.id)
 
             if (existingCatKeys.isNotEmpty()) {
-                // Datenbank ist bereits gefüllt -> 0ms Wartezeit, 0% CPU-Last!
                 return@withContext 0
             }
             synchronizePlaylistWithSmartLock(activePlaylist)
@@ -156,7 +154,7 @@ class XtreamSyncRepository(
                         providerCategoryId = catId,
                         categoryName = catName,
                         sectionType = section,
-                        isVisible = !isBrandNewGroup,
+                        isVisible = true, // L10 GARANTIE: Immer sichtbar, auch Adult/Neue Gruppen!
                         isLocked = false,
                         isNewlyDiscovered = isBrandNewGroup,
                         customSortOrder = sortIndex
@@ -166,7 +164,7 @@ class XtreamSyncRepository(
             return key
         }
 
-        // 1. KATEGORIEN LADEN
+        // 1. KATEGORIEN LADEN (Live, VOD & Serien)
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
             buildCategoryEntity(
@@ -298,6 +296,9 @@ class XtreamSyncRepository(
         newlyDiscoveredCount
     }
 
+    /**
+     * ON-DEMAND TURBO: Lädt VOD-Filme pro Kategorie nach (unterstützt Arrays UND PHP-Objekte)!
+     */
     suspend fun fetchVodStreamsForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
@@ -515,16 +516,28 @@ class XtreamSyncRepository(
             parameter("password", playlist.password)
             parameter("action", action)
         }.body<String>().trim()
-        if (!raw.startsWith("[")) return@runCatching emptyList()
 
-        val jsonArray = jsonParser.parseToJsonElement(raw) as? JsonArray ?: return@runCatching emptyList()
-        val resultList = ArrayList<XtreamCategoryDto>(jsonArray.size)
-        for (item in jsonArray) {
-            if (item is JsonObject) {
-                runCatching {
-                    resultList.add(jsonParser.decodeFromJsonElement<XtreamCategoryDto>(item))
+        if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
+
+        val parsed = jsonParser.parseToJsonElement(raw)
+        val resultList = mutableListOf<XtreamCategoryDto>()
+
+        when (parsed) {
+            is JsonArray -> {
+                for (item in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
                 }
             }
+            is JsonObject -> {
+                for ((_, item) in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
+                }
+            }
+            else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
@@ -539,20 +552,35 @@ class XtreamSyncRepository(
             parameter("password", playlist.password)
             parameter("action", "get_live_streams")
         }.body<String>().trim()
-        if (!raw.startsWith("[")) return@runCatching emptyList()
 
-        val jsonArray = jsonParser.parseToJsonElement(raw) as? JsonArray ?: return@runCatching emptyList()
-        val resultList = ArrayList<XtreamLiveStreamDto>(jsonArray.size)
-        for (item in jsonArray) {
-            if (item is JsonObject) {
-                runCatching {
-                    resultList.add(jsonParser.decodeFromJsonElement<XtreamLiveStreamDto>(item))
+        if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
+
+        val parsed = jsonParser.parseToJsonElement(raw)
+        val resultList = mutableListOf<XtreamLiveStreamDto>()
+
+        when (parsed) {
+            is JsonArray -> {
+                for (item in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
                 }
             }
+            is JsonObject -> {
+                for ((_, item) in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
+                }
+            }
+            else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
 
+    /**
+     * L10 Resilient VOD Parser: Liest JSON-Arrays [...] UND PHP-Assoziativ-Objekte {...}!
+     */
     private suspend fun fetchVodStreams(
         endpoint: String,
         playlist: PlaylistEntity,
@@ -567,16 +595,28 @@ class XtreamSyncRepository(
                 parameter("category_id", categoryId)
             }
         }.body<String>().trim()
-        if (!raw.startsWith("[")) return@runCatching emptyList()
 
-        val jsonArray = jsonParser.parseToJsonElement(raw) as? JsonArray ?: return@runCatching emptyList()
-        val resultList = ArrayList<XtreamVodStreamDto>(jsonArray.size)
-        for (item in jsonArray) {
-            if (item is JsonObject) {
-                runCatching {
-                    resultList.add(jsonParser.decodeFromJsonElement<XtreamVodStreamDto>(item))
+        if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
+
+        val parsed = jsonParser.parseToJsonElement(raw)
+        val resultList = mutableListOf<XtreamVodStreamDto>()
+
+        when (parsed) {
+            is JsonArray -> {
+                for (item in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
                 }
             }
+            is JsonObject -> {
+                for ((_, item) in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
+                }
+            }
+            else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
@@ -595,16 +635,28 @@ class XtreamSyncRepository(
                 parameter("category_id", categoryId)
             }
         }.body<String>().trim()
-        if (!raw.startsWith("[")) return@runCatching emptyList()
 
-        val jsonArray = jsonParser.parseToJsonElement(raw) as? JsonArray ?: return@runCatching emptyList()
-        val resultList = ArrayList<XtreamSeriesDto>(jsonArray.size)
-        for (item in jsonArray) {
-            if (item is JsonObject) {
-                runCatching {
-                    resultList.add(jsonParser.decodeFromJsonElement<XtreamSeriesDto>(item))
+        if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
+
+        val parsed = jsonParser.parseToJsonElement(raw)
+        val resultList = mutableListOf<XtreamSeriesDto>()
+
+        when (parsed) {
+            is JsonArray -> {
+                for (item in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
                 }
             }
+            is JsonObject -> {
+                for ((_, item) in parsed) {
+                    if (item is JsonObject) {
+                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+                    }
+                }
+            }
+            else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
