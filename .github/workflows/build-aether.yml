@@ -5,6 +5,9 @@ on:
   push:
     branches: [ "main" ]
 
+permissions:
+  contents: write
+
 jobs:
   build-fire-tv-apk:
     name: "📺 Fire TV APK bauen"
@@ -13,12 +16,36 @@ jobs:
     steps:
       - name: "Projekt-Dateien laden"
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: "Java 17 einrichten"
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: "Festen APK-Signaturschlüssel verankern (Kein Datenverlust bei Updates)"
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f "composeApp/aether-debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore composeApp/aether-debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            git config user.name "Aether Build Bot"
+            git config user.email "actions@github.com"
+            git add composeApp/aether-debug.keystore
+            git commit -m "🔒 Festen APK-Signaturschlüssel verankert [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin HEAD:main || true
+          fi
+          cp composeApp/aether-debug.keystore ~/.android/debug.keystore
 
       - name: "Gradle installieren"
         uses: gradle/actions/setup-gradle@v3
