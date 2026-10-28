@@ -1,6 +1,11 @@
 package com.aether.stream.feature.player
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -10,7 +15,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -22,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -29,6 +34,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -85,6 +91,7 @@ fun LiveTvDualCockpitScreen(
 
     val railFocusRequester = remember { FocusRequester() }
     val activeCategoryFocusRequester = remember { FocusRequester() }
+    val firstCategoryFallbackRequester = remember { FocusRequester() }
     val mediaListEntryFocusRequester = remember { FocusRequester() }
 
     var categoryScrubJob by remember { mutableStateOf<Job?>(null) }
@@ -183,16 +190,26 @@ fun LiveTvDualCockpitScreen(
                     .padding(10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // ZONE 1: Left Navigation Rail
+                // ZONE 1: Dynamische Zwei-Stufen-Sidebar (Schritt 1: 68.dp eingeklappt <-> 230.dp aufgeklappt)
                 LeftNavigationRailZone1(
                     activeSection = activeSection,
+                    selectedCategoryKey = selectedCategoryKey,
                     railFocusRequester = railFocusRequester,
                     onNavigateRightToCategories = {
-                        runCatching { activeCategoryFocusRequester.requestFocus() }
+                        val movedToSelected = runCatching {
+                            activeCategoryFocusRequester.requestFocus()
+                        }.isSuccess
+                        if (!movedToSelected) {
+                            runCatching { firstCategoryFallbackRequester.requestFocus() }
+                        }
                     },
                     onSelectSection = { section ->
                         categoryScrubJob?.cancel()
                         onSelectSection(section)
+                    },
+                    onSelectMyList = {
+                        categoryScrubJob?.cancel()
+                        onSelectCategory(SYS_QUICK_FAV)
                     },
                     onOpenSearch = onOpenSearch,
                     onOpenSettings = onOpenSettings
@@ -223,13 +240,17 @@ fun LiveTvDualCockpitScreen(
                             },
                             color = AetherColors.CyberCyan,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
                         )
                         Text(
                             text = "${categories.size}",
                             color = AetherColors.IceBlue.copy(alpha = 0.8f),
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
@@ -241,15 +262,15 @@ fun LiveTvDualCockpitScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                         contentPadding = PaddingValues(vertical = 4.dp)
                     ) {
-                        items(
+                        itemsIndexed(
                             items = categoryUiItems,
-                            key = { item -> "${activeSection.name}_${item.key}" }
-                        ) { item ->
+                            key = { _, item -> "${activeSection.name}_${item.key}" }
+                        ) { index, item ->
                             val isSelected = item.key == selectedCategoryKey
-                            val itemMod = if (isSelected) {
-                                Modifier.focusRequester(activeCategoryFocusRequester)
-                            } else {
-                                Modifier
+                            val itemMod = when {
+                                isSelected -> Modifier.focusRequester(activeCategoryFocusRequester)
+                                index == 0 -> Modifier.focusRequester(firstCategoryFallbackRequester)
+                                else -> Modifier
                             }
 
                             ObsidianCategoryRowItem(
@@ -453,7 +474,12 @@ fun LiveTvDualCockpitScreen(
                                         onToggleFavorite = { onQuickFavoriteToggle(stream) },
                                         onOpenFolderModal = { onOpenFavoriteFolderDialog(stream) },
                                         onNavigateLeftToCategories = {
-                                            runCatching { activeCategoryFocusRequester.requestFocus() }
+                                            val movedToSelected = runCatching {
+                                                activeCategoryFocusRequester.requestFocus()
+                                            }.isSuccess
+                                            if (!movedToSelected) {
+                                                runCatching { firstCategoryFallbackRequester.requestFocus() }
+                                            }
                                         }
                                     )
                                 }
@@ -466,69 +492,251 @@ fun LiveTvDualCockpitScreen(
     }
 }
 
+/**
+ * SCHRITT 1: Dynamische Zwei-Stufen-Sidebar (Zone 1) nach TiviMate-Blueprint (Bild 1, 4 & 6).
+ * - Zustand A (Aufgeklappt, 230.dp): Sobald der D-Pad-Fokus in Zone 1 liegt.
+ * - Zustand B (Eingeklappt, 68.dp): Sobald der Fokus nach rechts in Zone 2 wandert.
+ * - 60 FPS Phase Deferral: Liest die animierte Breite ausschließlich in `Modifier.layout`
+ *   und die Text-Deckkraft ausschließlich in `Modifier.graphicsLayer` (0 Recompositions).
+ */
 @Composable
 private fun LeftNavigationRailZone1(
     activeSection: AetherSectionType,
+    selectedCategoryKey: String,
     railFocusRequester: FocusRequester,
     onNavigateRightToCategories: () -> Unit,
     onSelectSection: (AetherSectionType) -> Unit,
+    onSelectMyList: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    var isRailExpanded by remember { mutableStateOf(false) }
+
+    val animatedWidthState = animateDpAsState(
+        targetValue = if (isRailExpanded) 230.dp else 68.dp,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "Zone1SidebarWidth"
+    )
+
+    val textAlphaState = animateFloatAsState(
+        targetValue = if (isRailExpanded) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (isRailExpanded) 150 else 85,
+            easing = LinearOutSlowInEasing
+        ),
+        label = "Zone1SidebarTextAlpha"
+    )
+
+    val isMyListActive = selectedCategoryKey == SYS_QUICK_FAV
+
     Column(
         modifier = Modifier
-            .width(68.dp)
             .fillMaxHeight()
+            // PHASE DEFERRAL: Breiten-Animation strikt im Layout-Pass (0 Recompositions)
+            .layout { measurable, constraints ->
+                val minWidthPx = 68.dp.roundToPx()
+                val maxWidthPx = 230.dp.roundToPx()
+                val currentWidthPx = animatedWidthState.value
+                    .roundToPx()
+                    .coerceIn(minWidthPx, maxWidthPx)
+
+                val fixedConstraints = constraints.copy(
+                    minWidth = currentWidthPx,
+                    maxWidth = currentWidthPx
+                )
+                val placeable = measurable.measure(fixedConstraints)
+                layout(currentWidthPx, placeable.height) {
+                    placeable.placeRelative(0, 0)
+                }
+            }
             .clip(RoundedCornerShape(12.dp))
-            .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.90f))
+            .clipToBounds()
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(
+                        AetherColors.ObsidianBlack,
+                        AetherColors.DeepSpaceNavy.copy(alpha = 0.94f)
+                    )
+                )
+            )
             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-            .padding(vertical = 12.dp, horizontal = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
+            .onFocusChanged { focusState ->
+                isRailExpanded = focusState.hasFocus
+            }
+            .padding(vertical = 14.dp, horizontal = 6.dp),
+        horizontalAlignment = Alignment.Start
     ) {
-        Box(
+        // 1. DYNAMISCHER AETH BRAND HEADER (Analog zu "tivimate" <-> "tv" in Bild 1 & 6)
+        Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(AetherColors.CyberCyan.copy(alpha = 0.16f))
-                .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 6.dp, vertical = 5.dp),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .height(40.dp)
+                .clipToBounds(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("AETH", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+            // Fester 56.dp Slot (perfekt zentriert innerhalb der 68.dp Leiste)
+            Box(
+                modifier = Modifier
+                    .width(56.dp)
+                    .fillMaxHeight(),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AetherColors.CyberCyan.copy(alpha = 0.16f))
+                        .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "AE",
+                        color = AetherColors.CyberCyan,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            // Aufklappender Vollname im Zustand A (Bild 1 & 4)
+            Row(
+                modifier = Modifier
+                    .graphicsLayer {
+                        val a = textAlphaState.value
+                        alpha = a
+                        translationX = (1f - a) * (-8.dp.toPx())
+                    },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "AETH",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 1.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "STREAM",
+                    color = AetherColors.CyberCyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.2.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
         }
 
+        Spacer(modifier = Modifier.height(18.dp))
+
+        // 2. HAUPTNAVIGATION (Bild 1–6: Suchen, TV, Filme, Serien, Aufnahmen, Meine Liste)
         Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            RailIconButton("🔍", "Suche", false, Modifier, onNavigateRightToCategories, onOpenSearch)
+            RailIconButton(
+                icon = "🔍",
+                label = "Suchen",
+                isActive = false,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = Modifier,
+                onNavigateRight = onNavigateRightToCategories,
+                onClick = onOpenSearch
+            )
+
             RailIconButton(
                 icon = "📺",
-                label = "Live",
-                isActive = activeSection == AetherSectionType.LIVE,
-                modifier = if (activeSection == AetherSectionType.LIVE) Modifier.focusRequester(railFocusRequester) else Modifier,
+                label = "TV",
+                isActive = activeSection == AetherSectionType.LIVE && !isMyListActive,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = if (activeSection == AetherSectionType.LIVE) {
+                    Modifier.focusRequester(railFocusRequester)
+                } else {
+                    Modifier
+                },
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = { onSelectSection(AetherSectionType.LIVE) }
+                onClick = {
+                    onSelectSection(AetherSectionType.LIVE)
+                    onNavigateRightToCategories()
+                }
             )
+
             RailIconButton(
                 icon = "🎬",
-                label = "VOD",
-                isActive = activeSection == AetherSectionType.VOD,
-                modifier = if (activeSection == AetherSectionType.VOD) Modifier.focusRequester(railFocusRequester) else Modifier,
+                label = "Filme",
+                isActive = activeSection == AetherSectionType.VOD && !isMyListActive,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = if (activeSection == AetherSectionType.VOD) {
+                    Modifier.focusRequester(railFocusRequester)
+                } else {
+                    Modifier
+                },
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = { onSelectSection(AetherSectionType.VOD) }
+                onClick = {
+                    onSelectSection(AetherSectionType.VOD)
+                    onNavigateRightToCategories()
+                }
             )
+
             RailIconButton(
                 icon = "🍿",
                 label = "Serien",
-                isActive = activeSection == AetherSectionType.SERIES,
-                modifier = if (activeSection == AetherSectionType.SERIES) Modifier.focusRequester(railFocusRequester) else Modifier,
+                isActive = activeSection == AetherSectionType.SERIES && !isMyListActive,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = if (activeSection == AetherSectionType.SERIES) {
+                    Modifier.focusRequester(railFocusRequester)
+                } else {
+                    Modifier
+                },
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = { onSelectSection(AetherSectionType.SERIES) }
+                onClick = {
+                    onSelectSection(AetherSectionType.SERIES)
+                    onNavigateRightToCategories()
+                }
+            )
+
+            RailIconButton(
+                icon = "⏺",
+                label = "Aufnahmen",
+                isActive = false,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = Modifier,
+                onNavigateRight = onNavigateRightToCategories,
+                onClick = onNavigateRightToCategories
+            )
+
+            RailIconButton(
+                icon = "🔖",
+                label = "Meine Liste",
+                isActive = isMyListActive,
+                textAlphaProvider = { textAlphaState.value },
+                modifier = Modifier,
+                onNavigateRight = onNavigateRightToCategories,
+                onClick = {
+                    onSelectMyList()
+                    onNavigateRightToCategories()
+                }
             )
         }
 
-        RailIconButton("⚙️", "Setup", false, Modifier, onNavigateRightToCategories, onOpenSettings)
+        // Flexibler Spacer drückt "Einstellungen" wie in TiviMate (Bild 1–6) ganz nach unten
+        Spacer(modifier = Modifier.weight(1f))
+
+        // 3. UNTEN VERANKERTER EINSTELLUNGS-BUTTON
+        RailIconButton(
+            icon = "⚙️",
+            label = "Einstellungen",
+            isActive = false,
+            textAlphaProvider = { textAlphaState.value },
+            modifier = Modifier,
+            onNavigateRight = onNavigateRightToCategories,
+            onClick = onOpenSettings
+        )
     }
 }
 
@@ -537,25 +745,35 @@ private fun RailIconButton(
     icon: String,
     label: String,
     isActive: Boolean,
+    textAlphaProvider: () -> Float,
     modifier: Modifier = Modifier,
     onNavigateRight: () -> Unit,
     onClick: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
-    Column(
+    val focusScale by animateFloatAsState(
+        targetValue = if (isFocused) 1.03f else 1.0f,
+        animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
+        label = "RailRowScale"
+    )
+
+    Row(
         modifier = modifier
             .fillMaxWidth()
+            .height(46.dp)
             .graphicsLayer {
-                val s = if (isFocused) 1.06f else 1.0f
-                scaleX = s
-                scaleY = s
+                scaleX = focusScale
+                scaleY = focusScale
             }
             .clip(RoundedCornerShape(10.dp))
+            .clipToBounds()
             .background(
                 when {
-                    isFocused -> AetherColors.CyberCyan.copy(alpha = 0.25f)
-                    isActive -> AetherColors.DeepSpaceNavy
+                    // Zustand A Fokus-Pille (vgl. Bild 1 & 4) im Obsidian-Neon-Glass-Kontrast
+                    isFocused -> AetherColors.CyberCyan.copy(alpha = 0.28f)
+                    // Zustand B Passiver Indikator für das aktive Modul (vgl. Bild 6)
+                    isActive -> AetherColors.DeepSpaceNavy.copy(alpha = 0.95f)
                     else -> Color.Transparent
                 }
             )
@@ -572,19 +790,44 @@ private fun RailIconButton(
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
                     when (event.key) {
-                        Key.DirectionRight -> { onNavigateRight(); true }
-                        Key.DirectionCenter, Key.Enter -> { onClick(); true }
+                        Key.DirectionRight -> {
+                            onNavigateRight()
+                            true
+                        }
+                        Key.DirectionLeft -> {
+                            // Linke Wand: Fokus bricht am linken Rand nicht aus
+                            true
+                        }
+                        Key.DirectionCenter, Key.Enter -> {
+                            onClick()
+                            true
+                        }
                         else -> false
                     }
-                } else false
+                } else {
+                    false
+                }
             }
             .focusable()
-            .clickable { onClick() }
-            .padding(vertical = 8.dp, horizontal = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .clickable { onClick() },
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = icon, fontSize = 18.sp)
-        Spacer(modifier = Modifier.height(2.dp))
+        // Feste 56.dp Icon-Spur: Icon bewegt sich beim Auf-/Zuklappen um 0 Pixel
+        Box(
+            modifier = Modifier
+                .width(56.dp)
+                .fillMaxHeight(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = icon,
+                fontSize = 18.sp,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
+
+        // Aufklappendes Text-Label rechts neben dem Icon (Zustand A)
         Text(
             text = label,
             color = when {
@@ -592,9 +835,18 @@ private fun RailIconButton(
                 isActive -> AetherColors.CyberCyan
                 else -> AetherColors.TextSecondary
             },
-            fontSize = 10.sp,
+            fontSize = 14.sp,
             fontWeight = if (isFocused || isActive) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier
+                .padding(end = 12.dp)
+                .graphicsLayer {
+                    val a = textAlphaProvider()
+                    alpha = a
+                    translationX = (1f - a) * (-6.dp.toPx())
+                }
         )
     }
 }
@@ -781,7 +1033,6 @@ fun TiviMateDetailsPanel(
                     if (techMeta.videoCodec.isNotBlank()) {
                         DetailBadge(techMeta.videoCodec, AetherColors.CyberCyan.copy(alpha = 0.35f), Color.White)
                     }
-                    // Gelbes Rating-Badge bleibt horizontal sauber fixiert
                     if (!stream.rating.isNullOrBlank() && stream.rating != "0") {
                         DetailBadge("★ ${stream.rating}", AetherColors.LaserAmber.copy(alpha = 0.5f), AetherColors.LaserAmber)
                     }
