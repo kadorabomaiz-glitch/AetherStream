@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,8 +37,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -48,9 +51,21 @@ import com.aether.stream.core.navigation.LiveTvLayoutMode
 import com.aether.stream.core.navigation.StreamBufferPreset
 import com.aether.stream.core.theme.AetherColors
 import com.aether.stream.data.local.*
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.http.isSuccess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import org.jetbrains.compose.resources.ExperimentalResourceApi
+import org.jetbrains.compose.resources.decodeToImageBitmap
 
 const val SYS_QUICK_FAV = "SYS_QUICK_FAV"
 const val SYS_RECENT = "SYS_RECENT"
@@ -60,6 +75,79 @@ private enum class CockpitViewportStage {
     STAGE_1_SIDEBAR_EXPANDED,
     STAGE_2_CATEGORIES_ACTIVE,
     STAGE_3_CONTENT_MAXIMIZED
+}
+
+/**
+ * Speichereffizienter In-Memory-LRU-Cache für VOD-Poster, Serien-Cover und Live-TV-Senderlogos.
+ * Schützt den Fire TV Cube durch Semaphore(4), 3.5-MB-Payload-Cap und Negativ-Caching.
+ */
+private object AetherPosterImageCache {
+    private const val MAX_CACHE_ENTRIES = 80
+    private const val MAX_IMAGE_BYTES = 3_500_000
+
+    private val memoryCache = LinkedHashMap<String, ImageBitmap>()
+    private val failedUrls = HashSet<String>()
+    private val downloadSemaphore = Semaphore(4)
+    private val httpClient by lazy { HttpClient() }
+
+    fun getCached(url: String?): ImageBitmap? {
+        val clean = url?.trim()?.takeIf { it.startsWith("http") } ?: return null
+        val hit = memoryCache[clean] ?: return null
+        memoryCache.remove(clean)
+        memoryCache[clean] = hit
+        return hit
+    }
+
+    @OptIn(ExperimentalResourceApi::class)
+    suspend fun fetchOrGet(url: String?): ImageBitmap? {
+        val clean = url?.trim()?.takeIf { it.startsWith("http") } ?: return null
+        getCached(clean)?.let { return it }
+        if (failedUrls.contains(clean)) return null
+
+        val decodedBitmap = withContext(Dispatchers.IO) {
+            downloadSemaphore.withPermit {
+                runCatching {
+                    val response = httpClient.get(clean) {
+                        header("User-Agent", "TiviMate/4.7.0 (Android 11; FireTV)")
+                    }
+                    if (!response.status.isSuccess()) return@runCatching null
+                    val bytes: ByteArray = response.body()
+                    if (bytes.isEmpty() || bytes.size > MAX_IMAGE_BYTES) return@runCatching null
+                    bytes.decodeToImageBitmap()
+                }.getOrNull()
+            }
+        }
+
+        if (decodedBitmap != null) {
+            if (memoryCache.size >= MAX_CACHE_ENTRIES) {
+                val oldestKey = memoryCache.keys.firstOrNull()
+                if (oldestKey != null) memoryCache.remove(oldestKey)
+            }
+            memoryCache[clean] = decodedBitmap
+        } else {
+            if (failedUrls.size > 500) failedUrls.clear()
+            failedUrls.add(clean)
+        }
+        return decodedBitmap
+    }
+}
+
+@Composable
+private fun rememberAetherAsyncBitmap(
+    imageUrl: String?,
+    debounceMs: Long = 80L
+): ImageBitmap? {
+    var bitmap by remember(imageUrl) {
+        mutableStateOf(AetherPosterImageCache.getCached(imageUrl))
+    }
+
+    LaunchedEffect(imageUrl) {
+        if (bitmap == null && !imageUrl.isNullOrBlank() && imageUrl.startsWith("http")) {
+            if (debounceMs > 0L) delay(debounceMs)
+            bitmap = AetherPosterImageCache.fetchOrGet(imageUrl)
+        }
+    }
+    return bitmap
 }
 
 data class CockpitCategoryUiItem(
@@ -615,6 +703,10 @@ private fun TiviMateVodSeriesHeroPanel(
     val paletteColor = remember(stream?.uniqueStreamKey) {
         resolveDeterministicPosterAccent(stream?.name ?: "AETH")
     }
+    val backdropBitmap = rememberAetherAsyncBitmap(
+        imageUrl = stream?.logoUrl,
+        debounceMs = 40L
+    )
 
     Box(
         modifier = modifier
@@ -652,15 +744,26 @@ private fun TiviMateVodSeriesHeroPanel(
                     ),
                 contentAlignment = Alignment.CenterEnd
             ) {
-                Text(
-                    text = cleanMeta.monogram,
-                    color = Color.White.copy(alpha = 0.08f),
-                    fontSize = 110.sp,
-                    fontWeight = FontWeight.Black,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier.padding(end = 18.dp)
-                )
+                if (backdropBitmap != null) {
+                    Image(
+                        bitmap = backdropBitmap,
+                        contentDescription = stream.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = 0.65f }
+                    )
+                } else {
+                    Text(
+                        text = cleanMeta.monogram,
+                        color = Color.White.copy(alpha = 0.08f),
+                        fontSize = 110.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(end = 18.dp)
+                    )
+                }
 
                 Box(
                     modifier = Modifier
@@ -668,8 +771,8 @@ private fun TiviMateVodSeriesHeroPanel(
                         .background(
                             Brush.horizontalGradient(
                                 colors = listOf(
-                                    AetherColors.DeepSpaceNavy.copy(alpha = 0.96f),
-                                    AetherColors.DeepSpaceNavy.copy(alpha = 0.45f),
+                                    AetherColors.DeepSpaceNavy.copy(alpha = 0.98f),
+                                    AetherColors.DeepSpaceNavy.copy(alpha = 0.55f),
                                     Color.Transparent
                                 )
                             )
@@ -871,6 +974,11 @@ private fun VodSeriesPosterCardItem(
         extractHeroMetadataFromStream(stream)
     }
 
+    val posterBitmap = rememberAetherAsyncBitmap(
+        imageUrl = stream.logoUrl,
+        debounceMs = 80L
+    )
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -928,29 +1036,51 @@ private fun VodSeriesPosterCardItem(
                     )
                 )
         ) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text(
-                    text = cleanMeta.monogram,
-                    color = Color.White.copy(alpha = if (isFocused) 0.35f else 0.20f),
-                    fontSize = 36.sp,
-                    fontWeight = FontWeight.Black,
-                    maxLines = 1,
-                    softWrap = false
+            if (posterBitmap != null) {
+                Image(
+                    bitmap = posterBitmap,
+                    contentDescription = stream.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = cleanMeta.cleanDisplayTitle,
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    AetherColors.ObsidianBlack.copy(alpha = 0.35f),
+                                    Color.Transparent,
+                                    AetherColors.ObsidianBlack.copy(alpha = 0.65f)
+                                )
+                            )
+                        )
                 )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = cleanMeta.monogram,
+                        color = Color.White.copy(alpha = if (isFocused) 0.35f else 0.20f),
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = cleanMeta.cleanDisplayTitle,
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             if (cleanMeta.qualityTag.isNotBlank()) {
@@ -987,7 +1117,7 @@ private fun VodSeriesPosterCardItem(
             ) {
                 Text(
                     text = if (stream.isQuickFavorite) "★" else "☆",
-                    color = if (stream.isQuickFavorite) AetherColors.LaserAmber else Color.White.copy(alpha = 0.45f),
+                    color = if (stream.isQuickFavorite) AetherColors.LaserAmber else Color.White.copy(alpha = 0.7f),
                     fontSize = 14.sp,
                     maxLines = 1,
                     softWrap = false
@@ -1685,6 +1815,10 @@ private fun Zone4MediaRowItem(
     onNavigateLeftToCategories: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val channelLogoBitmap = rememberAetherAsyncBitmap(
+        imageUrl = stream.logoUrl,
+        debounceMs = 100L
+    )
 
     Row(
         modifier = modifier
@@ -1722,7 +1856,7 @@ private fun Zone4MediaRowItem(
             }
             .focusable()
             .clickable { onClickStream() }
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -1730,28 +1864,36 @@ private fun Zone4MediaRowItem(
             color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(42.dp)
+            modifier = Modifier.width(38.dp)
         )
 
-        val badgeText = when (stream.sectionType) {
-            AetherSectionType.LIVE -> "TV"
-            AetherSectionType.VOD -> "VOD"
-            AetherSectionType.SERIES -> "SERIE"
-        }
-        val badgeColor = when (stream.sectionType) {
-            AetherSectionType.LIVE -> AetherColors.CyberCyan
-            AetherSectionType.VOD -> AetherColors.NeonEmerald
-            AetherSectionType.SERIES -> AetherColors.LaserAmber
-        }
-
+        // SENDERLOGO-BOX (wie in Bild 1, 6 & 7 neben der Kanalnummer)
         Box(
             modifier = Modifier
+                .width(46.dp)
+                .height(28.dp)
                 .clip(RoundedCornerShape(4.dp))
-                .background(badgeColor.copy(alpha = 0.16f))
-                .border(1.dp, badgeColor.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 2.dp)
+                .background(Color.White.copy(alpha = if (channelLogoBitmap != null) 0.92f else 0.08f))
+                .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(4.dp)),
+            contentAlignment = Alignment.Center
         ) {
-            Text(text = badgeText, color = badgeColor, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+            if (channelLogoBitmap != null) {
+                Image(
+                    bitmap = channelLogoBitmap,
+                    contentDescription = stream.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(2.dp)
+                )
+            } else {
+                Text(
+                    text = "TV",
+                    color = AetherColors.CyberCyan,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
         }
 
         Spacer(modifier = Modifier.width(10.dp))
@@ -1788,15 +1930,6 @@ private fun Zone4MediaRowItem(
                     fontWeight = FontWeight.Medium
                 )
             }
-        }
-
-        if (stream.sectionType == AetherSectionType.VOD && !stream.containerExtension.isNullOrBlank()) {
-            Text(
-                text = ".${stream.containerExtension.lowercase()}",
-                color = AetherColors.IceBlue.copy(alpha = 0.7f),
-                fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
         }
 
         Box(
