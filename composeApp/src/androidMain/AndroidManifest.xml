@@ -10,6 +10,9 @@
     <application
         android:allowBackup="true"
         android:label="AETHER Stream"
+        android:icon="@drawable/ic_aether_launcher"
+        android:roundIcon="@drawable/ic_aether_launcher"
+        android:banner="@drawable/ic_aether_launcher"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
@@ -17,6 +20,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:icon="@drawable/ic_aether_launcher"
+            android:banner="@drawable/ic_aether_launcher"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation">
             <intent-filter>
