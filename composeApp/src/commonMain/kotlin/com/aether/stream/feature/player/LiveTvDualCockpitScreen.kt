@@ -45,6 +45,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aether.stream.core.navigation.LiveTvLayoutMode
@@ -64,6 +65,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.datetime.Clock
+import kotlinx.datetime.DayOfWeek
+import kotlinx.datetime.Instant
+import kotlinx.datetime.Month
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.compose.resources.ExperimentalResourceApi
 import org.jetbrains.compose.resources.decodeToImageBitmap
 
@@ -77,14 +84,9 @@ private enum class CockpitViewportStage {
     STAGE_3_CONTENT_MAXIMIZED
 }
 
-/**
- * Speichereffizienter In-Memory-LRU-Cache für VOD-Poster, Serien-Cover und Live-TV-Senderlogos.
- * Schützt den Fire TV Cube durch Semaphore(4), 3.5-MB-Payload-Cap und Negativ-Caching.
- */
 private object AetherPosterImageCache {
     private const val MAX_CACHE_ENTRIES = 80
     private const val MAX_IMAGE_BYTES = 3_500_000
-
     private val memoryCache = LinkedHashMap<String, ImageBitmap>()
     private val failedUrls = HashSet<String>()
     private val downloadSemaphore = Semaphore(4)
@@ -120,8 +122,7 @@ private object AetherPosterImageCache {
 
         if (decodedBitmap != null) {
             if (memoryCache.size >= MAX_CACHE_ENTRIES) {
-                val oldestKey = memoryCache.keys.firstOrNull()
-                if (oldestKey != null) memoryCache.remove(oldestKey)
+                memoryCache.keys.firstOrNull()?.let { memoryCache.remove(it) }
             }
             memoryCache[clean] = decodedBitmap
         } else {
@@ -133,14 +134,8 @@ private object AetherPosterImageCache {
 }
 
 @Composable
-private fun rememberAetherAsyncBitmap(
-    imageUrl: String?,
-    debounceMs: Long = 80L
-): ImageBitmap? {
-    var bitmap by remember(imageUrl) {
-        mutableStateOf(AetherPosterImageCache.getCached(imageUrl))
-    }
-
+private fun rememberAetherAsyncBitmap(imageUrl: String?, debounceMs: Long = 80L): ImageBitmap? {
+    var bitmap by remember(imageUrl) { mutableStateOf(AetherPosterImageCache.getCached(imageUrl)) }
     LaunchedEffect(imageUrl) {
         if (bitmap == null && !imageUrl.isNullOrBlank() && imageUrl.startsWith("http")) {
             if (debounceMs > 0L) delay(debounceMs)
@@ -148,6 +143,88 @@ private fun rememberAetherAsyncBitmap(
         }
     }
     return bitmap
+}
+
+private data class EpgTimelineClockSnapshot(
+    val dateTimeLabelDe: String,
+    val slotLabels: List<String>,
+    val playheadFraction: Float,
+    val nowEpochMillis: Long
+)
+
+@Composable
+private fun rememberEpgTimelineClockSnapshot(): EpgTimelineClockSnapshot {
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000L)
+            tick += 1L
+        }
+    }
+    return remember(tick) { computeCurrentEpgClockSnapshot() }
+}
+
+private fun computeCurrentEpgClockSnapshot(): EpgTimelineClockSnapshot {
+    val nowInstant = Clock.System.now()
+    val ldt = nowInstant.toLocalDateTime(TimeZone.currentSystemDefault())
+    val dayName = when (ldt.dayOfWeek) {
+        DayOfWeek.MONDAY -> "Mo."
+        DayOfWeek.TUESDAY -> "Di."
+        DayOfWeek.WEDNESDAY -> "Mi."
+        DayOfWeek.THURSDAY -> "Do."
+        DayOfWeek.FRIDAY -> "Fr."
+        DayOfWeek.SATURDAY -> "Sa."
+        DayOfWeek.SUNDAY -> "So."
+        else -> ""
+    }
+    val monthName = when (ldt.month) {
+        Month.JANUARY -> "Jan."
+        Month.FEBRUARY -> "Feb."
+        Month.MARCH -> "März"
+        Month.APRIL -> "Apr."
+        Month.MAY -> "Mai"
+        Month.JUNE -> "Juni"
+        Month.JULY -> "Juli"
+        Month.AUGUST -> "Aug."
+        Month.SEPTEMBER -> "Sept."
+        Month.OCTOBER -> "Okt."
+        Month.NOVEMBER -> "Nov."
+        Month.DECEMBER -> "Dez."
+        else -> ""
+    }
+    val hh = ldt.hour.toString().padStart(2, '0')
+    val mm = ldt.minute.toString().padStart(2, '0')
+    val baseHour = ldt.hour
+    val baseHalf = if (ldt.minute >= 30) 30 else 0
+    val minutesIntoSlot = (ldt.minute - baseHalf).coerceIn(0, 29)
+
+    val slots = buildList {
+        var h = baseHour
+        var m = baseHalf
+        repeat(4) {
+            add("${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}")
+            m += 30
+            if (m >= 60) {
+                m = 0
+                h = (h + 1) % 24
+            }
+        }
+    }
+    val fraction = (0.14f + (minutesIntoSlot.toFloat() / 120f)).coerceIn(0.10f, 0.85f)
+    return EpgTimelineClockSnapshot(
+        dateTimeLabelDe = "$dayName, ${ldt.dayOfMonth}. $monthName, $hh:$mm",
+        slotLabels = slots,
+        playheadFraction = fraction,
+        nowEpochMillis = nowInstant.toEpochMilliseconds()
+    )
+}
+
+private fun formatEpochToClockTime(epochMillis: Long): String {
+    if (epochMillis <= 0L) return ""
+    return runCatching {
+        val ldt = Instant.fromEpochMilliseconds(epochMillis).toLocalDateTime(TimeZone.currentSystemDefault())
+        "${ldt.hour.toString().padStart(2, '0')}:${ldt.minute.toString().padStart(2, '0')}"
+    }.getOrDefault("")
 }
 
 data class CockpitCategoryUiItem(
@@ -198,13 +275,13 @@ fun LiveTvDualCockpitScreen(
     var focusedPreviewStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isPureFullscreen by remember { mutableStateOf(startInPureFullscreen) }
 
+    val clockSnapshot = rememberEpgTimelineClockSnapshot()
+
     val requestCategoryFocus: () -> Unit = remember {
         {
             cockpitStage = CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE
-            val movedToSelected = runCatching { activeCategoryFocusRequester.requestFocus() }.isSuccess
-            if (!movedToSelected) {
-                runCatching { firstCategoryFallbackRequester.requestFocus() }
-            }
+            val moved = runCatching { activeCategoryFocusRequester.requestFocus() }.isSuccess
+            if (!moved) runCatching { firstCategoryFallbackRequester.requestFocus() }
         }
     }
 
@@ -216,9 +293,7 @@ fun LiveTvDualCockpitScreen(
     }
 
     LaunchedEffect(startInPureFullscreen, currentPlayingStream?.uniqueStreamKey) {
-        if (startInPureFullscreen && currentPlayingStream != null) {
-            isPureFullscreen = true
-        }
+        if (startInPureFullscreen && currentPlayingStream != null) isPureFullscreen = true
     }
 
     val categoryUiItems = remember(categories, favoriteFolders, activeSection) {
@@ -243,9 +318,7 @@ fun LiveTvDualCockpitScreen(
     val vodGridState = rememberLazyGridState()
 
     LaunchedEffect(streamsInCategory, activeSection) {
-        if (activeSection != AetherSectionType.LIVE) {
-            focusedPreviewStream = streamsInCategory.firstOrNull()
-        }
+        if (activeSection != AetherSectionType.LIVE) focusedPreviewStream = streamsInCategory.firstOrNull()
     }
 
     LaunchedEffect(activeSection) {
@@ -473,9 +546,7 @@ fun LiveTvDualCockpitScreen(
                                         if (state.isFocused) cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
                                     }
                                     .focusable()
-                                    .clickable {
-                                        if (currentPlayingStream != null) isPureFullscreen = true
-                                    }
+                                    .clickable { if (currentPlayingStream != null) isPureFullscreen = true }
                                     .onKeyEvent { event ->
                                         if (event.type == KeyEventType.KeyDown) {
                                             when (event.key) {
@@ -483,10 +554,7 @@ fun LiveTvDualCockpitScreen(
                                                     if (currentPlayingStream != null) isPureFullscreen = true
                                                     true
                                                 }
-                                                Key.DirectionLeft -> {
-                                                    requestCategoryFocus()
-                                                    true
-                                                }
+                                                Key.DirectionLeft -> { requestCategoryFocus(); true }
                                                 Key.DirectionDown -> {
                                                     runCatching { mediaListEntryFocusRequester.requestFocus() }
                                                     true
@@ -519,6 +587,7 @@ fun LiveTvDualCockpitScreen(
                                 stream = focusedPreviewStream ?: currentPlayingStream,
                                 currentEpg = currentChannelEpg,
                                 activeCategoryTitle = activeCategoryTitle,
+                                nowEpochMillis = clockSnapshot.nowEpochMillis,
                                 modifier = Modifier.weight(1f).fillMaxHeight()
                             )
                         }
@@ -550,12 +619,7 @@ fun LiveTvDualCockpitScreen(
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     CircularProgressIndicator(color = AetherColors.CyberCyan, modifier = Modifier.size(36.dp))
                                     Spacer(modifier = Modifier.height(10.dp))
-                                    Text(
-                                        text = "⚡ Lade Einträge dieser Kategorie vom Server...",
-                                        color = AetherColors.CyberCyan,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Text("⚡ Lade Einträge dieser Kategorie vom Server...", color = AetherColors.CyberCyan, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         } else if (streamsInCategory.isEmpty()) {
@@ -571,40 +635,82 @@ fun LiveTvDualCockpitScreen(
                                 )
                             }
                         } else if (!isPosterGridSection) {
-                            LazyColumn(
-                                state = mediaListState,
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                contentPadding = PaddingValues(vertical = 4.dp)
-                            ) {
-                                itemsIndexed(
-                                    items = streamsInCategory,
-                                    key = { _, stream -> stream.uniqueStreamKey }
-                                ) { index, stream ->
-                                    val isPlayingThis = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
-                                    val entryMod = if (index == 0) Modifier.focusRequester(mediaListEntryFocusRequester) else Modifier
+                            val channelColumnWidth = 285.dp
 
-                                    Zone4MediaRowItem(
-                                        indexNumber = index + 1,
-                                        stream = stream,
-                                        isCurrentlyPlaying = isPlayingThis,
-                                        modifier = entryMod,
-                                        onFocused = {
-                                            cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
-                                            focusedPreviewStream = stream
-                                        },
-                                        onClickStream = {
-                                            if (isPlayingThis) {
-                                                isPureFullscreen = true
-                                            } else {
-                                                isPureFullscreen = false
-                                                onSelectStream(stream)
-                                            }
-                                        },
-                                        onToggleFavorite = { onQuickFavoriteToggle(stream) },
-                                        onOpenFolderModal = { onOpenFavoriteFolderDialog(stream) },
-                                        onNavigateLeftToCategories = requestCategoryFocus
-                                    )
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                TiviMateLiveEpgHeader(
+                                    clockSnapshot = clockSnapshot,
+                                    channelColumnWidth = channelColumnWidth
+                                )
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                                    val timelineAreaWidth = (maxWidth - channelColumnWidth).coerceAtLeast(100.dp)
+                                    val playheadOffsetX = channelColumnWidth + (timelineAreaWidth * clockSnapshot.playheadFraction)
+
+                                    LazyColumn(
+                                        state = mediaListState,
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                        contentPadding = PaddingValues(vertical = 4.dp)
+                                    ) {
+                                        itemsIndexed(
+                                            items = streamsInCategory,
+                                            key = { _, stream -> stream.uniqueStreamKey }
+                                        ) { index, stream ->
+                                            val isPlayingThis = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
+                                            val isPreviewingThis = (focusedPreviewStream?.uniqueStreamKey ?: currentPlayingStream?.uniqueStreamKey) == stream.uniqueStreamKey
+                                            val entryMod = if (index == 0) Modifier.focusRequester(mediaListEntryFocusRequester) else Modifier
+                                            val rowEpgList = if (isPreviewingThis || isPlayingThis) currentChannelEpg else emptyList()
+
+                                            Zone4MediaRowItem(
+                                                indexNumber = index + 1,
+                                                stream = stream,
+                                                isCurrentlyPlaying = isPlayingThis,
+                                                channelColumnWidth = channelColumnWidth,
+                                                rowEpgPrograms = rowEpgList,
+                                                modifier = entryMod,
+                                                onFocused = {
+                                                    cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+                                                    focusedPreviewStream = stream
+                                                },
+                                                onClickStream = {
+                                                    if (isPlayingThis) {
+                                                        isPureFullscreen = true
+                                                    } else {
+                                                        isPureFullscreen = false
+                                                        onSelectStream(stream)
+                                                    }
+                                                },
+                                                onToggleFavorite = { onQuickFavoriteToggle(stream) },
+                                                onOpenFolderModal = { onOpenFavoriteFolderDialog(stream) },
+                                                onNavigateLeftToCategories = requestCategoryFocus
+                                            )
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .offset(x = playheadOffsetX - 3.dp, y = 0.dp)
+                                            .fillMaxHeight()
+                                            .width(7.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopCenter)
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(AetherColors.CyberCyan)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopCenter)
+                                                .fillMaxHeight()
+                                                .width(1.5.dp)
+                                                .background(AetherColors.CyberCyan.copy(alpha = 0.65f))
+                                        )
+                                    }
                                 }
                             }
                         } else {
@@ -694,19 +800,52 @@ fun LiveTvDualCockpitScreen(
 }
 
 @Composable
+private fun TiviMateLiveEpgHeader(
+    clockSnapshot: EpgTimelineClockSnapshot,
+    channelColumnWidth: Dp
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.width(channelColumnWidth), contentAlignment = Alignment.CenterStart) {
+                Text(
+                    text = clockSnapshot.dateTimeLabelDe,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                clockSnapshot.slotLabels.forEach { slotTime ->
+                    Text(
+                        text = slotTime,
+                        color = AetherColors.IceBlue.copy(alpha = 0.9f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(AetherColors.CyberCyan.copy(alpha = 0.30f)))
+    }
+}
+
+@Composable
 private fun TiviMateVodSeriesHeroPanel(
     stream: StreamItemEntity?,
     activeSection: AetherSectionType,
     activeCategoryTitle: String,
     modifier: Modifier = Modifier
 ) {
-    val paletteColor = remember(stream?.uniqueStreamKey) {
-        resolveDeterministicPosterAccent(stream?.name ?: "AETH")
-    }
-    val backdropBitmap = rememberAetherAsyncBitmap(
-        imageUrl = stream?.logoUrl,
-        debounceMs = 40L
-    )
+    val paletteColor = remember(stream?.uniqueStreamKey) { resolveDeterministicPosterAccent(stream?.name ?: "AETH") }
+    val backdropBitmap = rememberAetherAsyncBitmap(imageUrl = stream?.logoUrl, debounceMs = 40L)
 
     Box(
         modifier = modifier
@@ -717,11 +856,7 @@ private fun TiviMateVodSeriesHeroPanel(
     ) {
         if (stream == null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "Wähle einen Titel aus dem Poster-Grid für Details.",
-                    color = AetherColors.IceBlue.copy(alpha = 0.7f),
-                    fontSize = 14.sp
-                )
+                Text("Wähle einen Titel aus dem Poster-Grid für Details.", color = AetherColors.IceBlue.copy(alpha = 0.7f), fontSize = 14.sp)
             }
         } else {
             val cleanMeta = remember(stream.name, stream.rating, stream.totalDurationMs, stream.containerExtension) {
@@ -735,11 +870,7 @@ private fun TiviMateVodSeriesHeroPanel(
                     .fillMaxWidth(0.42f)
                     .background(
                         Brush.horizontalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                paletteColor.copy(alpha = 0.28f),
-                                paletteColor.copy(alpha = 0.48f)
-                            )
+                            colors = listOf(Color.Transparent, paletteColor.copy(alpha = 0.28f), paletteColor.copy(alpha = 0.48f))
                         )
                     ),
                 contentAlignment = Alignment.CenterEnd
@@ -749,9 +880,7 @@ private fun TiviMateVodSeriesHeroPanel(
                         bitmap = backdropBitmap,
                         contentDescription = stream.name,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer { alpha = 0.65f }
+                        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 0.65f }
                     )
                 } else {
                     Text(
@@ -764,7 +893,6 @@ private fun TiviMateVodSeriesHeroPanel(
                         modifier = Modifier.padding(end = 18.dp)
                     )
                 }
-
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -781,9 +909,7 @@ private fun TiviMateVodSeriesHeroPanel(
             }
 
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -801,53 +927,27 @@ private fun TiviMateVodSeriesHeroPanel(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.padding(start = 12.dp)
                         ) {
                             if (stream.isQuickFavorite) {
-                                Text(
-                                    text = "★ FAVORIT",
-                                    color = AetherColors.LaserAmber,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
+                                Text("★ FAVORIT", color = AetherColors.LaserAmber, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                             }
                             if (activeCategoryTitle.isNotBlank()) {
-                                DetailBadge(
-                                    text = activeCategoryTitle,
-                                    borderColor = AetherColors.CyberCyan.copy(alpha = 0.35f),
-                                    textColor = AetherColors.IceBlue
-                                )
+                                DetailBadge(activeCategoryTitle, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.IceBlue)
                             }
                         }
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(Color.White)
-                                .padding(horizontal = 7.dp, vertical = 2.dp),
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.White).padding(horizontal = 7.dp, vertical = 2.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = cleanMeta.ratingBadgeText,
-                                color = AetherColors.ObsidianBlack,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Black,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            Text(cleanMeta.ratingBadgeText, color = AetherColors.ObsidianBlack, fontSize = 12.sp, fontWeight = FontWeight.Black, maxLines = 1, softWrap = false)
                         }
-
                         Text(
                             text = cleanMeta.infoLineText,
                             color = Color.White.copy(alpha = 0.92f),
@@ -857,21 +957,11 @@ private fun TiviMateVodSeriesHeroPanel(
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
-
                         if (cleanMeta.qualityTag.isNotBlank()) {
-                            DetailBadge(
-                                text = cleanMeta.qualityTag,
-                                borderColor = AetherColors.CyberCyan.copy(alpha = 0.5f),
-                                textColor = AetherColors.CyberCyan
-                            )
+                            DetailBadge(cleanMeta.qualityTag, AetherColors.CyberCyan.copy(alpha = 0.5f), AetherColors.CyberCyan)
                         }
-
                         if (!stream.containerExtension.isNullOrBlank()) {
-                            DetailBadge(
-                                text = stream.containerExtension.uppercase(),
-                                borderColor = AetherColors.NeonEmerald.copy(alpha = 0.45f),
-                                textColor = AetherColors.NeonEmerald
-                            )
+                            DetailBadge(stream.containerExtension.uppercase(), AetherColors.NeonEmerald.copy(alpha = 0.45f), AetherColors.NeonEmerald)
                         }
                     }
 
@@ -899,26 +989,11 @@ private fun TiviMateVodSeriesHeroPanel(
                         (stream.resumePositionMs.toFloat() / stream.totalDurationMs.toFloat()).coerceIn(0.02f, 1f)
                     } else 0.15f
 
-                    Column(
-                        modifier = Modifier.fillMaxWidth(0.65f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "▶ Fortsetzen bei ${formatMillisToTime(stream.resumePositionMs)}",
-                                color = AetherColors.NeonEmerald,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                    Column(modifier = Modifier.fillMaxWidth(0.65f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("▶ Fortsetzen bei ${formatMillisToTime(stream.resumePositionMs)}", color = AetherColors.NeonEmerald, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             if (stream.totalDurationMs > 0L) {
-                                Text(
-                                    text = "${(progressFraction * 100).toInt()}% (${formatMillisToTime(stream.totalDurationMs)})",
-                                    color = AetherColors.IceBlue,
-                                    fontSize = 11.sp
-                                )
+                                Text("${(progressFraction * 100).toInt()}% (${formatMillisToTime(stream.totalDurationMs)})", color = AetherColors.IceBlue, fontSize = 11.sp)
                             }
                         }
                         LinearProgressIndicator(
@@ -959,25 +1034,14 @@ private fun VodSeriesPosterCardItem(
     onNavigateLeftToCategories: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
-
     val focusScale by animateFloatAsState(
         targetValue = if (isFocused) 1.04f else 1.0f,
         animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
         label = "PosterCardScale"
     )
-
-    val accentColor = remember(stream.uniqueStreamKey) {
-        resolveDeterministicPosterAccent(stream.name)
-    }
-
-    val cleanMeta = remember(stream.name, stream.rating) {
-        extractHeroMetadataFromStream(stream)
-    }
-
-    val posterBitmap = rememberAetherAsyncBitmap(
-        imageUrl = stream.logoUrl,
-        debounceMs = 80L
-    )
+    val accentColor = remember(stream.uniqueStreamKey) { resolveDeterministicPosterAccent(stream.name) }
+    val cleanMeta = remember(stream.name, stream.rating) { extractHeroMetadataFromStream(stream) }
+    val posterBitmap = rememberAetherAsyncBitmap(imageUrl = stream.logoUrl, debounceMs = 80L)
 
     Column(
         modifier = modifier
@@ -1007,14 +1071,8 @@ private fun VodSeriesPosterCardItem(
                                 true
                             } else false
                         }
-                        Key.DirectionCenter, Key.Enter -> {
-                            onClickStream()
-                            true
-                        }
-                        Key.Menu, Key.Bookmark -> {
-                            onOpenFolderModal()
-                            true
-                        }
+                        Key.DirectionCenter, Key.Enter -> { onClickStream(); true }
+                        Key.Menu, Key.Bookmark -> { onOpenFolderModal(); true }
                         else -> false
                     }
                 } else false
@@ -1028,31 +1086,18 @@ private fun VodSeriesPosterCardItem(
                 .weight(1f)
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(
-                            accentColor.copy(alpha = 0.55f),
-                            AetherColors.DeepSpaceNavy.copy(alpha = 0.92f),
-                            AetherColors.ObsidianBlack
-                        )
+                        colors = listOf(accentColor.copy(alpha = 0.55f), AetherColors.DeepSpaceNavy.copy(alpha = 0.92f), AetherColors.ObsidianBlack)
                     )
                 )
         ) {
             if (posterBitmap != null) {
-                Image(
-                    bitmap = posterBitmap,
-                    contentDescription = stream.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                Image(bitmap = posterBitmap, contentDescription = stream.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                colors = listOf(
-                                    AetherColors.ObsidianBlack.copy(alpha = 0.35f),
-                                    Color.Transparent,
-                                    AetherColors.ObsidianBlack.copy(alpha = 0.65f)
-                                )
+                                colors = listOf(AetherColors.ObsidianBlack.copy(alpha = 0.35f), Color.Transparent, AetherColors.ObsidianBlack.copy(alpha = 0.65f))
                             )
                         )
                 )
@@ -1062,24 +1107,9 @@ private fun VodSeriesPosterCardItem(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        text = cleanMeta.monogram,
-                        color = Color.White.copy(alpha = if (isFocused) 0.35f else 0.20f),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Black,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Text(cleanMeta.monogram, color = Color.White.copy(alpha = if (isFocused) 0.35f else 0.20f), fontSize = 36.sp, fontWeight = FontWeight.Black, maxLines = 1, softWrap = false)
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = cleanMeta.cleanDisplayTitle,
-                        color = Color.White.copy(alpha = 0.85f),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text(cleanMeta.cleanDisplayTitle, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
 
@@ -1093,14 +1123,7 @@ private fun VodSeriesPosterCardItem(
                         .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
                         .padding(horizontal = 5.dp, vertical = 1.dp)
                 ) {
-                    Text(
-                        text = cleanMeta.qualityTag,
-                        color = AetherColors.CyberCyan,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Text(cleanMeta.qualityTag, color = AetherColors.CyberCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
             }
 
@@ -1109,10 +1132,7 @@ private fun VodSeriesPosterCardItem(
                     .align(Alignment.TopEnd)
                     .padding(4.dp)
                     .clip(CircleShape)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { onToggleFavorite() }
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onToggleFavorite() }
                     .padding(4.dp)
             ) {
                 Text(
@@ -1132,14 +1152,7 @@ private fun VodSeriesPosterCardItem(
                     .background(Color(0xFF0284C7))
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
-                Text(
-                    text = cleanMeta.ratingBadgeText,
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = 1,
-                    softWrap = false
-                )
+                Text(cleanMeta.ratingBadgeText, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
             }
 
             if (stream.resumePositionMs > 0L) {
@@ -1159,10 +1172,7 @@ private fun VodSeriesPosterCardItem(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(34.dp)
-                .background(
-                    if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.22f)
-                    else AetherColors.DeepSpaceNavy.copy(alpha = 0.95f)
-                )
+                .background(if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.22f) else AetherColors.DeepSpaceNavy.copy(alpha = 0.95f))
                 .padding(horizontal = 8.dp),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -1189,37 +1199,26 @@ private data class ExtractedHeroMetadata(
 
 private fun extractHeroMetadataFromStream(stream: StreamItemEntity): ExtractedHeroMetadata {
     val rawName = stream.name.trim()
-    val strippedTitle = rawName
-        .replace(Regex("^(\\|?[A-Z]{2,3}\\|?\\s*[-|:]?\\s*)"), "")
-        .trim()
-        .ifBlank { rawName }
-
+    val strippedTitle = rawName.replace(Regex("^(\\|?[A-Z]{2,3}\\|?\\s*[-|:]?\\s*)"), "").trim().ifBlank { rawName }
     val words = strippedTitle.split(" ").filter { it.isNotBlank() }
     val monogram = when {
         words.size >= 2 -> "${words[0].first().uppercaseChar()}${words[1].first().uppercaseChar()}"
         strippedTitle.length >= 2 -> strippedTitle.take(2).uppercase()
         else -> "AE"
     }
-
-    val ratingClean = stream.rating
-        ?.trim()
-        ?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }
+    val ratingClean = stream.rating?.trim()?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }
         ?: if (stream.sectionType == AetherSectionType.SERIES) "SERIE" else "VOD"
-
     val yearMatch = Regex("\\b(19[7-9]\\d|20[0-2]\\d)\\b").find(rawName)?.value ?: "2025"
-
     val durationOrType = when {
         stream.totalDurationMs > 0L -> formatDurationReadable(stream.totalDurationMs)
         stream.sectionType == AetherSectionType.SERIES -> "Staffeln verfügbar"
         else -> "Spielfilm"
     }
-
     val genreLabel = when (stream.sectionType) {
         AetherSectionType.SERIES -> "Serie / Drama"
         AetherSectionType.VOD -> "Kino / On-Demand"
         AetherSectionType.LIVE -> "Live TV"
     }
-
     val upper = rawName.uppercase()
     val qualityTag = when {
         upper.contains("4K") || upper.contains("UHD") -> "4K UHD"
@@ -1228,29 +1227,17 @@ private fun extractHeroMetadataFromStream(stream: StreamItemEntity): ExtractedHe
         upper.contains("HDR") -> "HDR"
         else -> ""
     }
-
     return ExtractedHeroMetadata(
         cleanDisplayTitle = strippedTitle,
         monogram = monogram,
-        ratingBadgeText = ratingBadgeTextOf(ratingClean),
+        ratingBadgeText = if (ratingClean.length > 5) ratingClean.take(4) else ratingClean,
         infoLineText = "$yearMatch  •  $durationOrType  •  $genreLabel",
         qualityTag = qualityTag
     )
 }
 
-private fun ratingBadgeTextOf(raw: String): String {
-    return if (raw.length > 5) raw.take(4) else raw
-}
-
 private fun resolveDeterministicPosterAccent(seed: String): Color {
-    val palette = listOf(
-        Color(0xFF0284C7),
-        Color(0xFF2563EB),
-        Color(0xFF0D9488),
-        Color(0xFF4F46E5),
-        Color(0xFF0891B2),
-        Color(0xFF059669)
-    )
+    val palette = listOf(Color(0xFF0284C7), Color(0xFF2563EB), Color(0xFF0D9488), Color(0xFF4F46E5), Color(0xFF0891B2), Color(0xFF059669))
     val hash = seed.fold(0) { acc, c -> (acc * 31 + c.code) and 0x7FFFFFFF }
     return palette[hash % palette.size]
 }
@@ -1280,28 +1267,12 @@ private fun LeftNavigationRailZone1(
         CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE -> 68.dp
         CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED -> 0.dp
     }
-
     val isExpanded = cockpitStage == CockpitViewportStage.STAGE_1_SIDEBAR_EXPANDED
     val isVisible = cockpitStage != CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
 
-    val animatedWidthState = animateDpAsState(
-        targetValue = targetWidth,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "Zone1SidebarWidth"
-    )
-
-    val textAlphaState = animateFloatAsState(
-        targetValue = if (isExpanded) 1f else 0f,
-        animationSpec = tween(durationMillis = if (isExpanded) 150 else 85, easing = LinearOutSlowInEasing),
-        label = "Zone1SidebarTextAlpha"
-    )
-
-    val containerAlphaState = animateFloatAsState(
-        targetValue = if (isVisible) 1f else 0f,
-        animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
-        label = "Zone1ContainerAlpha"
-    )
-
+    val animatedWidthState = animateDpAsState(targetValue = targetWidth, animationSpec = tween(180, easing = FastOutSlowInEasing), label = "Zone1Width")
+    val textAlphaState = animateFloatAsState(targetValue = if (isExpanded) 1f else 0f, animationSpec = tween(if (isExpanded) 150 else 85, easing = LinearOutSlowInEasing), label = "Zone1TextAlpha")
+    val containerAlphaState = animateFloatAsState(targetValue = if (isVisible) 1f else 0f, animationSpec = tween(140, easing = LinearOutSlowInEasing), label = "Zone1Alpha")
     val isMyListActive = selectedCategoryKey == SYS_QUICK_FAV
 
     Column(
@@ -1314,13 +1285,7 @@ private fun LeftNavigationRailZone1(
                 val currentVisiblePx = animatedWidthState.value.roundToPx().coerceIn(0, maxRailPx)
                 val childMeasureWidthPx = currentVisiblePx.coerceIn(minRailPx, maxRailPx)
                 val placeable = measurable.measure(constraints.copy(minWidth = childMeasureWidthPx, maxWidth = childMeasureWidthPx))
-
-                val trailingGapPx = if (currentVisiblePx >= minRailPx) {
-                    gapPx
-                } else if (currentVisiblePx > 0) {
-                    ((currentVisiblePx.toFloat() / minRailPx.toFloat()) * gapPx).toInt()
-                } else 0
-
+                val trailingGapPx = if (currentVisiblePx >= minRailPx) gapPx else if (currentVisiblePx > 0) ((currentVisiblePx.toFloat() / minRailPx.toFloat()) * gapPx).toInt() else 0
                 layout(currentVisiblePx + trailingGapPx, placeable.height) {
                     val offsetX = if (currentVisiblePx < minRailPx) currentVisiblePx - minRailPx else 0
                     placeable.placeRelative(x = offsetX, y = 0)
@@ -1329,22 +1294,13 @@ private fun LeftNavigationRailZone1(
             .graphicsLayer { alpha = containerAlphaState.value }
             .clip(RoundedCornerShape(12.dp))
             .clipToBounds()
-            .background(
-                Brush.horizontalGradient(
-                    colors = listOf(AetherColors.ObsidianBlack, AetherColors.DeepSpaceNavy.copy(alpha = 0.94f))
-                )
-            )
+            .background(Brush.horizontalGradient(listOf(AetherColors.ObsidianBlack, AetherColors.DeepSpaceNavy.copy(alpha = 0.94f))))
             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-            .onFocusChanged { focusState ->
-                if (focusState.hasFocus) onStageChangedToRail()
-            }
+            .onFocusChanged { if (it.hasFocus) onStageChangedToRail() }
             .padding(vertical = 14.dp, horizontal = 6.dp),
         horizontalAlignment = Alignment.Start
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().height(40.dp).clipToBounds(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(modifier = Modifier.fillMaxWidth().height(40.dp).clipToBounds(), verticalAlignment = Alignment.CenterVertically) {
             Box(modifier = Modifier.width(56.dp).fillMaxHeight(), contentAlignment = Alignment.Center) {
                 Box(
                     modifier = Modifier
@@ -1357,7 +1313,6 @@ private fun LeftNavigationRailZone1(
                     Text("AE", color = AetherColors.CyberCyan, fontSize = 14.sp, fontWeight = FontWeight.Black, maxLines = 1, softWrap = false)
                 }
             }
-
             Row(
                 modifier = Modifier.graphicsLayer {
                     val a = textAlphaState.value
@@ -1383,10 +1338,7 @@ private fun LeftNavigationRailZone1(
                 textAlphaProvider = { textAlphaState.value },
                 modifier = if (activeSection == AetherSectionType.LIVE) Modifier.focusRequester(railFocusRequester) else Modifier,
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = {
-                    onSelectSection(AetherSectionType.LIVE)
-                    onNavigateRightToCategories()
-                }
+                onClick = { onSelectSection(AetherSectionType.LIVE); onNavigateRightToCategories() }
             )
             RailIconButton(
                 icon = "🎬",
@@ -1395,10 +1347,7 @@ private fun LeftNavigationRailZone1(
                 textAlphaProvider = { textAlphaState.value },
                 modifier = if (activeSection == AetherSectionType.VOD) Modifier.focusRequester(railFocusRequester) else Modifier,
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = {
-                    onSelectSection(AetherSectionType.VOD)
-                    onNavigateRightToCategories()
-                }
+                onClick = { onSelectSection(AetherSectionType.VOD); onNavigateRightToCategories() }
             )
             RailIconButton(
                 icon = "🍿",
@@ -1407,10 +1356,7 @@ private fun LeftNavigationRailZone1(
                 textAlphaProvider = { textAlphaState.value },
                 modifier = if (activeSection == AetherSectionType.SERIES) Modifier.focusRequester(railFocusRequester) else Modifier,
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = {
-                    onSelectSection(AetherSectionType.SERIES)
-                    onNavigateRightToCategories()
-                }
+                onClick = { onSelectSection(AetherSectionType.SERIES); onNavigateRightToCategories() }
             )
             RailIconButton("⏺", "Aufnahmen", false, { textAlphaState.value }, Modifier, onNavigateRightToCategories, onNavigateRightToCategories)
             RailIconButton(
@@ -1420,15 +1366,11 @@ private fun LeftNavigationRailZone1(
                 textAlphaProvider = { textAlphaState.value },
                 modifier = Modifier,
                 onNavigateRight = onNavigateRightToCategories,
-                onClick = {
-                    onSelectMyList()
-                    onNavigateRightToCategories()
-                }
+                onClick = { onSelectMyList(); onNavigateRightToCategories() }
             )
         }
 
         Spacer(modifier = Modifier.weight(1f))
-
         RailIconButton("⚙️", "Einstellungen", false, { textAlphaState.value }, Modifier, onNavigateRightToCategories, onOpenSettings)
     }
 }
@@ -1444,20 +1386,13 @@ private fun RailIconButton(
     onClick: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val focusScale by animateFloatAsState(
-        targetValue = if (isFocused) 1.03f else 1.0f,
-        animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
-        label = "RailRowScale"
-    )
+    val focusScale by animateFloatAsState(if (isFocused) 1.03f else 1.0f, tween(120, easing = FastOutSlowInEasing), label = "RailRowScale")
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(46.dp)
-            .graphicsLayer {
-                scaleX = focusScale
-                scaleY = focusScale
-            }
+            .graphicsLayer { scaleX = focusScale; scaleY = focusScale }
             .clip(RoundedCornerShape(10.dp))
             .clipToBounds()
             .background(
@@ -1506,13 +1441,11 @@ private fun RailIconButton(
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip,
-            modifier = Modifier
-                .padding(end = 12.dp)
-                .graphicsLayer {
-                    val a = textAlphaProvider()
-                    alpha = a
-                    translationX = (1f - a) * (-6.dp.toPx())
-                }
+            modifier = Modifier.padding(end = 12.dp).graphicsLayer {
+                val a = textAlphaProvider()
+                alpha = a
+                translationX = (1f - a) * (-6.dp.toPx())
+            }
         )
     }
 }
@@ -1611,10 +1544,7 @@ private fun ObsidianCategoryRowItem(
         if (item.isNewlyDiscovered) {
             Spacer(modifier = Modifier.width(6.dp))
             Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(AetherColors.NeonEmerald.copy(alpha = 0.2f))
-                    .padding(horizontal = 5.dp, vertical = 2.dp)
+                modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(AetherColors.NeonEmerald.copy(alpha = 0.2f)).padding(horizontal = 5.dp, vertical = 2.dp)
             ) {
                 Text("NEU", color = AetherColors.NeonEmerald, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
@@ -1628,6 +1558,7 @@ fun TiviMateDetailsPanel(
     stream: StreamItemEntity?,
     currentEpg: List<EpgProgramEntity>,
     activeCategoryTitle: String = "",
+    nowEpochMillis: Long = 0L,
     modifier: Modifier = Modifier
 ) {
     val techMeta by playerEngine.techMetadata.collectAsState()
@@ -1642,13 +1573,12 @@ fun TiviMateDetailsPanel(
     ) {
         if (stream == null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "Wähle einen Eintrag aus der Liste für Detailinformationen.",
-                    color = AetherColors.IceBlue.copy(alpha = 0.65f),
-                    fontSize = 13.sp
-                )
+                Text("Wähle einen Eintrag aus der Liste für Detailinformationen.", color = AetherColors.IceBlue.copy(alpha = 0.65f), fontSize = 13.sp)
             }
         } else {
+            val epgNow = currentEpg.firstOrNull()
+            val primaryHeaderTitle = if (!epgNow?.title.isNullOrBlank()) epgNow!!.title else stream.name
+
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1656,19 +1586,15 @@ fun TiviMateDetailsPanel(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = stream.name,
+                        text = primaryHeaderTitle,
                         color = Color.White,
-                        fontSize = 17.sp,
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(start = 12.dp)) {
                         Text(
                             text = if (stream.isQuickFavorite) "★" else "☆",
                             color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.IceBlue.copy(alpha = 0.8f),
@@ -1679,105 +1605,51 @@ fun TiviMateDetailsPanel(
                         )
                         if (activeCategoryTitle.isNotBlank()) {
                             Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = activeCategoryTitle,
-                                color = AetherColors.IceBlue,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            Text(activeCategoryTitle, color = AetherColors.IceBlue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                         }
                     }
                 }
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val sectionLabel = when (stream.sectionType) {
-                        AetherSectionType.LIVE -> "LIVE TV"
-                        AetherSectionType.VOD -> "VOD FILM"
-                        AetherSectionType.SERIES -> "SERIE"
-                    }
-                    DetailBadge(sectionLabel, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (epgNow != null && epgNow.startEpochMillis > 0L && epgNow.endEpochMillis > epgNow.startEpochMillis) {
+                        val startStr = formatEpochToClockTime(epgNow.startEpochMillis)
+                        val endStr = formatEpochToClockTime(epgNow.endEpochMillis)
+                        val totalDur = (epgNow.endEpochMillis - epgNow.startEpochMillis).coerceAtLeast(1L)
+                        val effectiveNow = if (nowEpochMillis > 0L) nowEpochMillis else Clock.System.now().toEpochMilliseconds()
+                        val epgProg = ((effectiveNow - epgNow.startEpochMillis).toFloat() / totalDur.toFloat()).coerceIn(0.05f, 1f)
+                        val remainMin = ((epgNow.endEpochMillis - effectiveNow) / 60_000L).coerceAtLeast(1L)
 
-                    if (!stream.containerExtension.isNullOrBlank()) {
-                        DetailBadge(stream.containerExtension.uppercase(), AetherColors.NeonEmerald.copy(alpha = 0.45f), AetherColors.NeonEmerald)
-                    }
-                    if (techMeta.resolutionLabel.isNotBlank()) {
-                        DetailBadge(techMeta.resolutionLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
-                    }
-                    if (techMeta.videoCodec.isNotBlank()) {
-                        DetailBadge(techMeta.videoCodec, AetherColors.CyberCyan.copy(alpha = 0.35f), Color.White)
-                    }
-                    if (!stream.rating.isNullOrBlank() && stream.rating != "0") {
-                        DetailBadge("★ ${stream.rating}", AetherColors.LaserAmber.copy(alpha = 0.5f), AetherColors.LaserAmber)
-                    }
-                }
-
-                val epgNow = currentEpg.firstOrNull()
-                val descriptionText = when {
-                    !stream.plotDescription.isNullOrBlank() -> stream.plotDescription
-                    epgNow != null -> "EPG: ${epgNow.title} — ${epgNow.description ?: ""}"
-                    stream.sectionType == AetherSectionType.LIVE ->
-                        "Direkter Live-Stream • 1x OK = Mini-Player, 2x OK = Vollbild."
-                    stream.sectionType == AetherSectionType.VOD ->
-                        "On-Demand Kinofilm • 1x OK startet direkt im Pure Fullscreen (.mkv/.mp4/.ts Fallback)."
-                    else ->
-                        "On-Demand Serie • 1x OK öffnet die Staffel- und Episodenauswahl."
-                }
-
-                Text(
-                    text = descriptionText,
-                    color = AetherColors.TextSecondary,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (stream.sectionType != AetherSectionType.LIVE && stream.resumePositionMs > 0L) {
-                val progressFraction = if (stream.totalDurationMs > 0L) {
-                    (stream.resumePositionMs.toFloat() / stream.totalDurationMs.toFloat()).coerceIn(0.02f, 1f)
-                } else 0.15f
-
-                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(
-                            text = "▶ Fortsetzen bei ${formatMillisToTime(stream.resumePositionMs)}",
-                            color = AetherColors.NeonEmerald,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                        Text("$startStr – $endStr", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                        LinearProgressIndicator(
+                            progress = { epgProg },
+                            modifier = Modifier.width(54.dp).height(4.dp).clip(RoundedCornerShape(2.dp)),
+                            color = AetherColors.CyberCyan,
+                            trackColor = AetherColors.DeepSpaceNavy
                         )
-                        if (stream.totalDurationMs > 0L) {
-                            Text(
-                                text = "${(progressFraction * 100).toInt()}% (${formatMillisToTime(stream.totalDurationMs)})",
-                                color = AetherColors.IceBlue,
-                                fontSize = 11.sp
-                            )
-                        }
+                        Text("$remainMin Min", color = AetherColors.IceBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
-                    LinearProgressIndicator(
-                        progress = { progressFraction },
-                        modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
-                        color = AetherColors.NeonEmerald,
-                        trackColor = AetherColors.DeepSpaceNavy
-                    )
+
+                    DetailBadge(stream.name, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
+                    if (techMeta.resolutionLabel.isNotBlank()) DetailBadge(techMeta.resolutionLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
+                    if (techMeta.videoCodec.isNotBlank()) DetailBadge(techMeta.videoCodec, AetherColors.CyberCyan.copy(alpha = 0.35f), Color.White)
                 }
-            } else {
-                Text(
-                    text = when (stream.sectionType) {
-                        AetherSectionType.VOD -> "Drücke [OK] für direkten Vollbild-Start • [LINKS/ZURÜCK] Kategorien"
-                        AetherSectionType.SERIES -> "Drücke [OK] für Episoden-Auswahl • [LINKS/ZURÜCK] Kategorien"
-                        AetherSectionType.LIVE -> "Drücke [OK] für Wiedergabe / Vollbild • [LINKS/ZURÜCK] Kategorien"
-                    },
-                    color = AetherColors.CyberCyan.copy(alpha = 0.85f),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
+
+                val descriptionText = when {
+                    !epgNow?.description.isNullOrBlank() -> epgNow!!.description!!
+                    !stream.plotDescription.isNullOrBlank() -> stream.plotDescription
+                    else -> "Live-Übertragung auf ${stream.name} • 1x OK = Vorschau im Mini-Player, 2x OK = Vollbild."
+                }
+                Text(descriptionText, color = AetherColors.TextSecondary, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
+
+            Text(
+                text = "Drücke [OK] für Wiedergabe / Vollbild • [MENÜ] Favoriten-Ordner • [LINKS/ZURÜCK] Kategorien",
+                color = AetherColors.CyberCyan.copy(alpha = 0.85f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                softWrap = false
+            )
         }
     }
 }
@@ -1791,14 +1663,7 @@ private fun DetailBadge(text: String, borderColor: Color, textColor: Color) {
             .border(1.dp, borderColor, RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
-        Text(
-            text = text,
-            color = textColor,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            softWrap = false
-        )
+        Text(text, color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
     }
 }
 
@@ -1807,6 +1672,8 @@ private fun Zone4MediaRowItem(
     indexNumber: Int,
     stream: StreamItemEntity,
     isCurrentlyPlaying: Boolean,
+    channelColumnWidth: Dp,
+    rowEpgPrograms: List<EpgProgramEntity>,
     modifier: Modifier = Modifier,
     onFocused: () -> Unit,
     onClickStream: () -> Unit,
@@ -1815,31 +1682,22 @@ private fun Zone4MediaRowItem(
     onNavigateLeftToCategories: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val channelLogoBitmap = rememberAetherAsyncBitmap(
-        imageUrl = stream.logoUrl,
-        debounceMs = 100L
-    )
+    val channelLogoBitmap = rememberAetherAsyncBitmap(imageUrl = stream.logoUrl, debounceMs = 100L)
+
+    val nowProgramTitle = remember(rowEpgPrograms, stream.plotDescription) {
+        rowEpgPrograms.firstOrNull()?.title?.takeIf { it.isNotBlank() }
+            ?: stream.plotDescription?.takeIf { it.isNotBlank() }
+            ?: "Keine Information"
+    }
+    val nextProgramTitle = remember(rowEpgPrograms) {
+        rowEpgPrograms.getOrNull(1)?.title?.takeIf { it.isNotBlank() } ?: "Keine Information"
+    }
+    val hasRealNowInfo = nowProgramTitle != "Keine Information"
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(
-                when {
-                    isFocused -> AetherColors.CyberCyan.copy(alpha = 0.20f)
-                    isCurrentlyPlaying -> AetherColors.NeonEmerald.copy(alpha = 0.14f)
-                    else -> AetherColors.ObsidianBlack.copy(alpha = 0.45f)
-                }
-            )
-            .border(
-                width = if (isFocused) 1.5.dp else 1.dp,
-                color = when {
-                    isFocused -> AetherColors.CyberCyan
-                    isCurrentlyPlaying -> AetherColors.NeonEmerald.copy(alpha = 0.65f)
-                    else -> Color.Transparent
-                },
-                shape = RoundedCornerShape(8.dp)
-            )
+            .height(42.dp)
             .onFocusChanged { state ->
                 isFocused = state.isFocused
                 if (state.isFocused) onFocused()
@@ -1855,97 +1713,156 @@ private fun Zone4MediaRowItem(
                 } else false
             }
             .focusable()
-            .clickable { onClickStream() }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .clickable { onClickStream() },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = "$indexNumber",
-            color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(38.dp)
-        )
-
-        // SENDERLOGO-BOX (wie in Bild 1, 6 & 7 neben der Kanalnummer)
-        Box(
+        Row(
             modifier = Modifier
-                .width(46.dp)
-                .height(28.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color.White.copy(alpha = if (channelLogoBitmap != null) 0.92f else 0.08f))
-                .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(4.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            if (channelLogoBitmap != null) {
-                Image(
-                    bitmap = channelLogoBitmap,
-                    contentDescription = stream.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(2.dp)
+                .width(channelColumnWidth)
+                .fillMaxHeight()
+                .padding(end = 8.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(
+                    when {
+                        isFocused -> AetherColors.DeepSpaceNavy.copy(alpha = 0.95f)
+                        isCurrentlyPlaying -> AetherColors.NeonEmerald.copy(alpha = 0.14f)
+                        else -> Color.Transparent
+                    }
                 )
-            } else {
+                .padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "$indexNumber",
+                color = if (isFocused) Color.White else AetherColors.TextSecondary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.width(32.dp)
+            )
+
+            Box(
+                modifier = Modifier
+                    .width(44.dp)
+                    .height(26.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.White.copy(alpha = if (channelLogoBitmap != null) 0.92f else 0.08f))
+                    .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.30f), RoundedCornerShape(4.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (channelLogoBitmap != null) {
+                    Image(bitmap = channelLogoBitmap, contentDescription = stream.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp))
+                } else {
+                    Text("TV", color = AetherColors.CyberCyan, fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+                }
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            if (isCurrentlyPlaying) {
+                Text("▶", color = AetherColors.NeonEmerald, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(end = 5.dp))
+            }
+
+            Text(
+                text = stream.name,
+                color = when {
+                    isFocused -> AetherColors.CyberCyan
+                    isCurrentlyPlaying -> AetherColors.NeonEmerald
+                    else -> Color.White
+                },
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onToggleFavorite() }
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
                 Text(
-                    text = "TV",
-                    color = AetherColors.CyberCyan,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    text = if (stream.isQuickFavorite) "★" else "☆",
+                    color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
                     maxLines = 1,
                     softWrap = false
                 )
             }
         }
 
-        Spacer(modifier = Modifier.width(10.dp))
-
-        if (isCurrentlyPlaying) {
-            Text(
-                text = "▶",
-                color = AetherColors.NeonEmerald,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.padding(end = 8.dp)
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = stream.name,
-                color = when {
-                    isFocused -> Color.White
-                    isCurrentlyPlaying -> AetherColors.NeonEmerald
-                    else -> AetherColors.TextPrimary
-                },
-                fontSize = 14.sp,
-                fontWeight = if (isFocused || isCurrentlyPlaying) FontWeight.Bold else FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            if (stream.sectionType != AetherSectionType.LIVE && stream.resumePositionMs > 0L) {
+        Row(
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(0.56f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        when {
+                            isFocused -> Color.White
+                            isCurrentlyPlaying -> AetherColors.CyberCyan.copy(alpha = 0.22f)
+                            else -> AetherColors.ObsidianBlack.copy(alpha = 0.55f)
+                        }
+                    )
+                    .border(
+                        width = if (isFocused) 1.5.dp else 1.dp,
+                        color = when {
+                            isFocused -> AetherColors.CyberCyan
+                            isCurrentlyPlaying -> AetherColors.CyberCyan.copy(alpha = 0.55f)
+                            else -> AetherColors.CyberCyan.copy(alpha = 0.16f)
+                        },
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
                 Text(
-                    text = "Fortsetzen ab ${formatMillisToTime(stream.resumePositionMs)}",
-                    color = AetherColors.NeonEmerald.copy(alpha = 0.9f),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium
+                    text = nowProgramTitle,
+                    color = when {
+                        isFocused -> AetherColors.ObsidianBlack
+                        hasRealNowInfo -> Color.White
+                        else -> AetherColors.TextSecondary.copy(alpha = 0.8f)
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = if (isFocused || hasRealNowInfo) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-        }
 
-        Box(
-            modifier = Modifier
-                .clip(CircleShape)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { onToggleFavorite() }
-                .padding(horizontal = 6.dp, vertical = 2.dp)
-        ) {
-            Text(
-                text = if (stream.isQuickFavorite) "★" else "☆",
-                color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary,
-                fontSize = 16.sp
-            )
+            Box(
+                modifier = Modifier
+                    .weight(0.44f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.18f) else AetherColors.ObsidianBlack.copy(alpha = 0.42f))
+                    .border(
+                        width = 1.dp,
+                        color = if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.45f) else AetherColors.CyberCyan.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text(
+                    text = nextProgramTitle,
+                    color = if (isFocused) Color.White else AetherColors.TextSecondary.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                    fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }
@@ -1971,10 +1888,7 @@ fun FullscreenPlayerHudOverlay(
     var interactionTick by remember { mutableLongStateOf(0L) }
     val hudFocusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) {
-        runCatching { hudFocusRequester.requestFocus() }
-    }
-
+    LaunchedEffect(Unit) { runCatching { hudFocusRequester.requestFocus() } }
     LaunchedEffect(interactionTick, isPlaying, isHudVisible) {
         if (isHudVisible && isPlaying) {
             delay(4500L)
@@ -1991,61 +1905,32 @@ fun FullscreenPlayerHudOverlay(
                 if (event.type == KeyEventType.KeyDown) {
                     interactionTick += 1L
                     if (!isHudVisible) isHudVisible = true
-
                     when (event.key) {
-                        Key.DirectionLeft -> {
-                            if (isCinemaMode) playerEngine.seekRelativeMs(-15_000L)
-                            true
-                        }
-                        Key.DirectionRight -> {
-                            if (isCinemaMode) playerEngine.seekRelativeMs(15_000L)
-                            true
-                        }
-                        Key.DirectionUp, Key.ChannelUp -> {
-                            if (!isCinemaMode) onZapChannelOffset(-1)
-                            true
-                        }
-                        Key.DirectionDown, Key.ChannelDown -> {
-                            if (!isCinemaMode) onZapChannelOffset(1)
-                            true
-                        }
+                        Key.DirectionLeft -> { if (isCinemaMode) playerEngine.seekRelativeMs(-15_000L); true }
+                        Key.DirectionRight -> { if (isCinemaMode) playerEngine.seekRelativeMs(15_000L); true }
+                        Key.DirectionUp, Key.ChannelUp -> { if (!isCinemaMode) onZapChannelOffset(-1); true }
+                        Key.DirectionDown, Key.ChannelDown -> { if (!isCinemaMode) onZapChannelOffset(1); true }
                         Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> {
                             if (isPlaying) playerEngine.pause() else playerEngine.resume()
                             true
                         }
-                        Key.Back, Key.Escape -> {
-                            onExitFullscreen()
-                            true
-                        }
+                        Key.Back, Key.Escape -> { onExitFullscreen(); true }
                         else -> false
                     }
                 } else false
             }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
                 interactionTick += 1L
                 isHudVisible = !isHudVisible
             }
     ) {
-        AnimatedVisibility(
-            visible = isHudVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxSize()
-        ) {
+        AnimatedVisibility(visible = isHudVisible, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            colors = listOf(
-                                AetherColors.ObsidianBlack.copy(alpha = 0.85f),
-                                Color.Transparent,
-                                Color.Transparent,
-                                AetherColors.ObsidianBlack.copy(alpha = 0.92f)
-                            )
+                            colors = listOf(AetherColors.ObsidianBlack.copy(alpha = 0.85f), Color.Transparent, Color.Transparent, AetherColors.ObsidianBlack.copy(alpha = 0.92f))
                         )
                     )
                     .padding(24.dp)
@@ -2058,66 +1943,35 @@ fun FullscreenPlayerHudOverlay(
                     Column {
                         Text(streamTitle, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            text = if (isCinemaMode) {
-                                "CINEMA FULLSCREEN • [LINKS/RECHTS] ±15s Spulen • [OK] Play/Pause • [ZURÜCK] Cockpit"
-                            } else {
-                                "LIVE TV FULLSCREEN • [AUF/AB] Zapping • [OK] Play/Pause • [ZURÜCK] Mini-Player"
-                            },
+                            text = if (isCinemaMode) "CINEMA FULLSCREEN • [LINKS/RECHTS] ±15s Spulen • [OK] Play/Pause • [ZURÜCK] Cockpit"
+                            else "LIVE TV FULLSCREEN • [AUF/AB] Zapping • [OK] Play/Pause • [ZURÜCK] Mini-Player",
                             color = AetherColors.CyberCyan,
                             fontSize = 12.sp
                         )
                     }
-
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (techMeta.resolutionLabel.isNotBlank()) {
-                            DetailBadge(techMeta.resolutionLabel, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
-                        }
-                        if (techMeta.fpsLabel.isNotBlank()) {
-                            DetailBadge(techMeta.fpsLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
-                        }
-                        if (techMeta.videoCodec.isNotBlank()) {
-                            DetailBadge(techMeta.videoCodec, AetherColors.NeonEmerald.copy(alpha = 0.45f), AetherColors.NeonEmerald)
-                        }
+                        if (techMeta.resolutionLabel.isNotBlank()) DetailBadge(techMeta.resolutionLabel, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
+                        if (techMeta.fpsLabel.isNotBlank()) DetailBadge(techMeta.fpsLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
+                        if (techMeta.videoCodec.isNotBlank()) DetailBadge(techMeta.videoCodec, AetherColors.NeonEmerald.copy(alpha = 0.45f), AetherColors.NeonEmerald)
                     }
                 }
 
-                Column(
-                    modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Column(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (isCinemaMode) {
-                        val progress = if (durationMs > 0L) {
-                            (currentPosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                        } else 0f
-
+                        val progress = if (durationMs > 0L) (currentPosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
                         LinearProgressIndicator(
                             progress = { progress },
                             modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
                             color = AetherColors.CyberCyan,
                             trackColor = AetherColors.DeepSpaceNavy
                         )
-
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(
-                                text = "${if (isPlaying) "▶" else "⏸"} ${formatMillisToTime(currentPosMs)}",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = if (durationMs > 0L) formatMillisToTime(durationMs) else "--:--",
-                                color = AetherColors.IceBlue,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                            Text("${if (isPlaying) "▶" else "⏸"} ${formatMillisToTime(currentPosMs)}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text(if (durationMs > 0L) formatMillisToTime(durationMs) else "--:--", color = AetherColors.IceBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
@@ -2126,30 +1980,17 @@ fun FullscreenPlayerHudOverlay(
                                 .clickable { onCyclePreset() }
                                 .padding(horizontal = 10.dp, vertical = 5.dp)
                         ) {
-                            Text(
-                                text = "PUFFER: ${currentPreset.name}",
-                                color = AetherColors.CyberCyan,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Text("PUFFER: ${currentPreset.name}", color = AetherColors.CyberCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (audioTracks.isNotEmpty()) {
                                 val activeAudio = audioTracks.firstOrNull { it.isSelected } ?: audioTracks.first()
-                                DetailBadge(
-                                    text = "🔊 ${activeAudio.languageLabel} (${activeAudio.codecLabel})",
-                                    borderColor = AetherColors.CyberCyan.copy(alpha = 0.35f),
-                                    textColor = AetherColors.IceBlue
-                                )
+                                DetailBadge("🔊 ${activeAudio.languageLabel} (${activeAudio.codecLabel})", AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.IceBlue)
                             }
                             if (subtitleTracks.isNotEmpty()) {
                                 val activeSub = subtitleTracks.firstOrNull { it.isSelected }
-                                DetailBadge(
-                                    text = "💬 ${activeSub?.languageLabel ?: "Aus"}",
-                                    borderColor = AetherColors.CyberCyan.copy(alpha = 0.35f),
-                                    textColor = AetherColors.IceBlue
-                                )
+                                DetailBadge("💬 ${activeSub?.languageLabel ?: "Aus"}", AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.IceBlue)
                             }
                         }
                     }
@@ -2166,10 +2007,5 @@ private fun formatMillisToTime(millis: Long): String {
     val seconds = totalSeconds % 60L
     val mStr = minutes.toString().padStart(2, '0')
     val sStr = seconds.toString().padStart(2, '0')
-    return if (hours > 0L) {
-        val hStr = hours.toString().padStart(2, '0')
-        "$hStr:$mStr:$sStr"
-    } else {
-        "$mStr:$sStr"
-    }
+    return if (hours > 0L) "${hours.toString().padStart(2, '0')}:$mStr:$sStr" else "$mStr:$sStr"
 }
