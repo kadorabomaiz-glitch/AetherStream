@@ -51,6 +51,18 @@ const val SYS_QUICK_FAV = "SYS_QUICK_FAV"
 const val SYS_RECENT = "SYS_RECENT"
 const val FOLDER_PREFIX = "FOLDER_"
 
+/**
+ * Drei-Stufen-Kaskade nach den visuellen TiviMate-Blueprints:
+ * - STAGE_1_SIDEBAR_EXPANDED (Bild 1 & 4): Zone 1 = 230.dp, Zone 2 = 250.dp
+ * - STAGE_2_CATEGORIES_ACTIVE (Bild 3 & 6): Zone 1 = 68.dp, Zone 2 = 250.dp
+ * - STAGE_3_CONTENT_MAXIMIZED (Bild 7): Zone 1 = 0.dp, Zone 2 = 0.dp (100% 16:9 Breite)
+ */
+private enum class CockpitViewportStage {
+    STAGE_1_SIDEBAR_EXPANDED,
+    STAGE_2_CATEGORIES_ACTIVE,
+    STAGE_3_CONTENT_MAXIMIZED
+}
+
 data class CockpitCategoryUiItem(
     val key: String,
     val title: String,
@@ -94,9 +106,29 @@ fun LiveTvDualCockpitScreen(
     val firstCategoryFallbackRequester = remember { FocusRequester() }
     val mediaListEntryFocusRequester = remember { FocusRequester() }
 
+    var cockpitStage by remember { mutableStateOf(CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE) }
     var categoryScrubJob by remember { mutableStateOf<Job?>(null) }
     var focusedPreviewStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isPureFullscreen by remember { mutableStateOf(startInPureFullscreen) }
+
+    val requestCategoryFocus: () -> Unit = remember {
+        {
+            cockpitStage = CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE
+            val movedToSelected = runCatching {
+                activeCategoryFocusRequester.requestFocus()
+            }.isSuccess
+            if (!movedToSelected) {
+                runCatching { firstCategoryFallbackRequester.requestFocus() }
+            }
+        }
+    }
+
+    val requestRailFocus: () -> Unit = remember {
+        {
+            cockpitStage = CockpitViewportStage.STAGE_1_SIDEBAR_EXPANDED
+            runCatching { railFocusRequester.requestFocus() }
+        }
+    }
 
     LaunchedEffect(startInPureFullscreen, currentPlayingStream?.uniqueStreamKey) {
         if (startInPureFullscreen && currentPlayingStream != null) {
@@ -132,6 +164,10 @@ fun LiveTvDualCockpitScreen(
         }
     }
 
+    val activeCategoryTitle = remember(categoryUiItems, selectedCategoryKey) {
+        categoryUiItems.firstOrNull { it.key == selectedCategoryKey }?.title ?: ""
+    }
+
     val categoryListState = rememberLazyListState()
     val mediaListState = rememberLazyListState()
 
@@ -145,18 +181,42 @@ fun LiveTvDualCockpitScreen(
         mediaListState.scrollToItem(0)
     }
 
+    // SCHRITT 2 ANIMATIONS-STATES FÜR ZONE 2 (250.dp in Stufe 1 & 2 <-> 0.dp in Stufe 3 / Bild 7)
+    val isZone2Visible = cockpitStage != CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+    val animatedZone2WidthState = animateDpAsState(
+        targetValue = if (isZone2Visible) 250.dp else 0.dp,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "Zone2CategoryWidth"
+    )
+    val animatedZone2AlphaState = animateFloatAsState(
+        targetValue = if (isZone2Visible) 1f else 0f,
+        animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
+        label = "Zone2CategoryAlpha"
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(AetherColors.ObsidianBlack)
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown && (event.key == Key.Back || event.key == Key.Escape)) {
-                    if (isPureFullscreen) {
-                        isPureFullscreen = false
-                        onBackToDashboard()
-                        true
-                    } else {
-                        false
+                    when {
+                        isPureFullscreen -> {
+                            isPureFullscreen = false
+                            onBackToDashboard()
+                            true
+                        }
+                        cockpitStage == CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED -> {
+                            // Aus Vollbreite (Bild 7) zurück in die Kategorieliste (Bild 6)
+                            requestCategoryFocus()
+                            true
+                        }
+                        cockpitStage == CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE -> {
+                            // Aus Kategorieliste (Bild 6) zurück in die aufgeklappte Hauptnavigation (Bild 1)
+                            requestRailFocus()
+                            true
+                        }
+                        else -> false
                     }
                 } else {
                     false
@@ -187,22 +247,18 @@ fun LiveTvDualCockpitScreen(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(10.dp)
             ) {
-                // ZONE 1: Dynamische Zwei-Stufen-Sidebar (Schritt 1: 68.dp eingeklappt <-> 230.dp aufgeklappt)
+                // ZONE 1: Drei-Stufen-Sidebar (230.dp in Stufe 1 <-> 68.dp in Stufe 2 <-> 0.dp in Stufe 3)
                 LeftNavigationRailZone1(
+                    cockpitStage = cockpitStage,
                     activeSection = activeSection,
                     selectedCategoryKey = selectedCategoryKey,
                     railFocusRequester = railFocusRequester,
-                    onNavigateRightToCategories = {
-                        val movedToSelected = runCatching {
-                            activeCategoryFocusRequester.requestFocus()
-                        }.isSuccess
-                        if (!movedToSelected) {
-                            runCatching { firstCategoryFallbackRequester.requestFocus() }
-                        }
+                    onStageChangedToRail = {
+                        cockpitStage = CockpitViewportStage.STAGE_1_SIDEBAR_EXPANDED
                     },
+                    onNavigateRightToCategories = requestCategoryFocus,
                     onSelectSection = { section ->
                         categoryScrubJob?.cancel()
                         onSelectSection(section)
@@ -215,14 +271,49 @@ fun LiveTvDualCockpitScreen(
                     onOpenSettings = onOpenSettings
                 )
 
-                // ZONE 2: Category Column
+                // ZONE 2: Category Column (250.dp in Stufe 1 & 2 <-> 0.dp Schubladen-Collapse in Stufe 3 / Bild 7)
                 Column(
                     modifier = Modifier
-                        .width(250.dp)
                         .fillMaxHeight()
+                        // PHASE DEFERRAL: Misst intern stabil mit 250.dp, animiert aber den Slot inkl. 10.dp Abstand auf 0.dp
+                        .layout { measurable, constraints ->
+                            val targetFixedPx = 250.dp.roundToPx()
+                            val gapPx = 10.dp.roundToPx()
+                            val currentVisiblePx = animatedZone2WidthState.value
+                                .roundToPx()
+                                .coerceIn(0, targetFixedPx)
+
+                            val trailingGapPx = if (currentVisiblePx > 0) {
+                                ((currentVisiblePx.toFloat() / targetFixedPx.toFloat()) * gapPx).toInt()
+                            } else {
+                                0
+                            }
+
+                            val placeable = measurable.measure(
+                                constraints.copy(
+                                    minWidth = targetFixedPx,
+                                    maxWidth = targetFixedPx
+                                )
+                            )
+
+                            val totalSlotWidth = currentVisiblePx + trailingGapPx
+                            layout(totalSlotWidth, placeable.height) {
+                                // Schiebt die Spalte beim Schließen wie eine Schublade nach links aus dem Viewport
+                                placeable.placeRelative(x = currentVisiblePx - targetFixedPx, y = 0)
+                            }
+                        }
+                        .graphicsLayer {
+                            alpha = animatedZone2AlphaState.value
+                        }
                         .clip(RoundedCornerShape(12.dp))
+                        .clipToBounds()
                         .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.78f))
                         .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                        .onFocusChanged { focusState ->
+                            if (focusState.hasFocus) {
+                                cockpitStage = CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE
+                            }
+                        }
                         .padding(vertical = 10.dp, horizontal = 8.dp)
                 ) {
                     Row(
@@ -294,13 +385,14 @@ fun LiveTvDualCockpitScreen(
                                 },
                                 onNavigateLeftToRail = {
                                     categoryScrubJob?.cancel()
-                                    runCatching { railFocusRequester.requestFocus() }
+                                    requestRailFocus()
                                 },
                                 onNavigateRightToMediaList = { committedKey ->
                                     categoryScrubJob?.cancel()
                                     if (committedKey != selectedCategoryKey) {
                                         onSelectCategory(committedKey)
                                     }
+                                    cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
                                     runCatching { mediaListEntryFocusRequester.requestFocus() }
                                 }
                             )
@@ -308,7 +400,7 @@ fun LiveTvDualCockpitScreen(
                     }
                 }
 
-                // RECHTE BÜHNE: ZONE 3 + ZONE 4
+                // RECHTE BÜHNE: ZONE 3 + ZONE 4 (Nutzt in Stufe 3 / Bild 7 volle 100% der 16:9-Breite!)
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -342,7 +434,12 @@ fun LiveTvDualCockpitScreen(
                                     },
                                     shape = RoundedCornerShape(8.dp)
                                 )
-                                .onFocusChanged { isMiniFocused = it.isFocused }
+                                .onFocusChanged { state ->
+                                    isMiniFocused = state.isFocused
+                                    if (state.isFocused) {
+                                        cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+                                    }
+                                }
                                 .focusable()
                                 .clickable {
                                     if (currentPlayingStream != null) {
@@ -350,13 +447,24 @@ fun LiveTvDualCockpitScreen(
                                     }
                                 }
                                 .onKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown &&
-                                        (event.key == Key.DirectionCenter || event.key == Key.Enter)
-                                    ) {
-                                        if (currentPlayingStream != null) {
-                                            isPureFullscreen = true
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when (event.key) {
+                                            Key.DirectionCenter, Key.Enter -> {
+                                                if (currentPlayingStream != null) {
+                                                    isPureFullscreen = true
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionLeft -> {
+                                                requestCategoryFocus()
+                                                true
+                                            }
+                                            Key.DirectionDown -> {
+                                                runCatching { mediaListEntryFocusRequester.requestFocus() }
+                                                true
+                                            }
+                                            else -> false
                                         }
-                                        true
                                     } else {
                                         false
                                     }
@@ -387,6 +495,7 @@ fun LiveTvDualCockpitScreen(
                             playerEngine = playerEngine,
                             stream = focusedPreviewStream ?: currentPlayingStream,
                             currentEpg = currentChannelEpg,
+                            activeCategoryTitle = activeCategoryTitle,
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
@@ -401,6 +510,11 @@ fun LiveTvDualCockpitScreen(
                             .clip(RoundedCornerShape(12.dp))
                             .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.78f))
                             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                            .onFocusChanged { focusState ->
+                                if (focusState.hasFocus) {
+                                    cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+                                }
+                            }
                             .padding(8.dp)
                     ) {
                         if (isLoadingStreams) {
@@ -451,7 +565,10 @@ fun LiveTvDualCockpitScreen(
                                         stream = stream,
                                         isCurrentlyPlaying = isPlayingThis,
                                         modifier = entryMod,
-                                        onFocused = { focusedPreviewStream = stream },
+                                        onFocused = {
+                                            cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+                                            focusedPreviewStream = stream
+                                        },
                                         onClickStream = {
                                             when (stream.sectionType) {
                                                 AetherSectionType.SERIES -> {
@@ -473,14 +590,7 @@ fun LiveTvDualCockpitScreen(
                                         },
                                         onToggleFavorite = { onQuickFavoriteToggle(stream) },
                                         onOpenFolderModal = { onOpenFavoriteFolderDialog(stream) },
-                                        onNavigateLeftToCategories = {
-                                            val movedToSelected = runCatching {
-                                                activeCategoryFocusRequester.requestFocus()
-                                            }.isSuccess
-                                            if (!movedToSelected) {
-                                                runCatching { firstCategoryFallbackRequester.requestFocus() }
-                                            }
-                                        }
+                                        onNavigateLeftToCategories = requestCategoryFocus
                                     )
                                 }
                             }
@@ -493,38 +603,52 @@ fun LiveTvDualCockpitScreen(
 }
 
 /**
- * SCHRITT 1: Dynamische Zwei-Stufen-Sidebar (Zone 1) nach TiviMate-Blueprint (Bild 1, 4 & 6).
- * - Zustand A (Aufgeklappt, 230.dp): Sobald der D-Pad-Fokus in Zone 1 liegt.
- * - Zustand B (Eingeklappt, 68.dp): Sobald der Fokus nach rechts in Zone 2 wandert.
- * - 60 FPS Phase Deferral: Liest die animierte Breite ausschließlich in `Modifier.layout`
- *   und die Text-Deckkraft ausschließlich in `Modifier.graphicsLayer` (0 Recompositions).
+ * SCHRITT 1 & 2: Dynamische Drei-Stufen-Sidebar (Zone 1) nach TiviMate-Blueprint (Bild 1, 6 & 7).
+ * - Stufe 1 (Bild 1 & 4): Aufgeklappt auf 230.dp (mit Text-Labels).
+ * - Stufe 2 (Bild 3 & 6): Eingeklappt auf 68.dp Icon-Schiene.
+ * - Stufe 3 (Bild 7): Komplett ausgeblendet auf 0.dp (für 100% 16:9-Breite der rechten Bühne).
  */
 @Composable
 private fun LeftNavigationRailZone1(
+    cockpitStage: CockpitViewportStage,
     activeSection: AetherSectionType,
     selectedCategoryKey: String,
     railFocusRequester: FocusRequester,
+    onStageChangedToRail: () -> Unit,
     onNavigateRightToCategories: () -> Unit,
     onSelectSection: (AetherSectionType) -> Unit,
     onSelectMyList: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    var isRailExpanded by remember { mutableStateOf(false) }
+    val targetWidth = when (cockpitStage) {
+        CockpitViewportStage.STAGE_1_SIDEBAR_EXPANDED -> 230.dp
+        CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE -> 68.dp
+        CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED -> 0.dp
+    }
+
+    val isExpanded = cockpitStage == CockpitViewportStage.STAGE_1_SIDEBAR_EXPANDED
+    val isVisible = cockpitStage != CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
 
     val animatedWidthState = animateDpAsState(
-        targetValue = if (isRailExpanded) 230.dp else 68.dp,
+        targetValue = targetWidth,
         animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "Zone1SidebarWidth"
     )
 
     val textAlphaState = animateFloatAsState(
-        targetValue = if (isRailExpanded) 1f else 0f,
+        targetValue = if (isExpanded) 1f else 0f,
         animationSpec = tween(
-            durationMillis = if (isRailExpanded) 150 else 85,
+            durationMillis = if (isExpanded) 150 else 85,
             easing = LinearOutSlowInEasing
         ),
         label = "Zone1SidebarTextAlpha"
+    )
+
+    val containerAlphaState = animateFloatAsState(
+        targetValue = if (isVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 140, easing = LinearOutSlowInEasing),
+        label = "Zone1ContainerAlpha"
     )
 
     val isMyListActive = selectedCategoryKey == SYS_QUICK_FAV
@@ -532,22 +656,45 @@ private fun LeftNavigationRailZone1(
     Column(
         modifier = Modifier
             .fillMaxHeight()
-            // PHASE DEFERRAL: Breiten-Animation strikt im Layout-Pass (0 Recompositions)
+            // PHASE DEFERRAL: Misst mindestens mit 68.dp (damit Icons nie gequetscht werden),
+            // reduziert aber in Stufe 3 den äußeren Layout-Slot + 10.dp Abstand auf 0px.
             .layout { measurable, constraints ->
-                val minWidthPx = 68.dp.roundToPx()
-                val maxWidthPx = 230.dp.roundToPx()
-                val currentWidthPx = animatedWidthState.value
-                    .roundToPx()
-                    .coerceIn(minWidthPx, maxWidthPx)
+                val minRailPx = 68.dp.roundToPx()
+                val maxRailPx = 230.dp.roundToPx()
+                val gapPx = 10.dp.roundToPx()
 
-                val fixedConstraints = constraints.copy(
-                    minWidth = currentWidthPx,
-                    maxWidth = currentWidthPx
+                val currentVisiblePx = animatedWidthState.value
+                    .roundToPx()
+                    .coerceIn(0, maxRailPx)
+
+                val childMeasureWidthPx = currentVisiblePx.coerceIn(minRailPx, maxRailPx)
+                val placeable = measurable.measure(
+                    constraints.copy(
+                        minWidth = childMeasureWidthPx,
+                        maxWidth = childMeasureWidthPx
+                    )
                 )
-                val placeable = measurable.measure(fixedConstraints)
-                layout(currentWidthPx, placeable.height) {
-                    placeable.placeRelative(0, 0)
+
+                val trailingGapPx = if (currentVisiblePx >= minRailPx) {
+                    gapPx
+                } else if (currentVisiblePx > 0) {
+                    ((currentVisiblePx.toFloat() / minRailPx.toFloat()) * gapPx).toInt()
+                } else {
+                    0
                 }
+
+                val totalSlotWidth = currentVisiblePx + trailingGapPx
+                layout(totalSlotWidth, placeable.height) {
+                    val offsetX = if (currentVisiblePx < minRailPx) {
+                        currentVisiblePx - minRailPx
+                    } else {
+                        0
+                    }
+                    placeable.placeRelative(x = offsetX, y = 0)
+                }
+            }
+            .graphicsLayer {
+                alpha = containerAlphaState.value
             }
             .clip(RoundedCornerShape(12.dp))
             .clipToBounds()
@@ -561,7 +708,9 @@ private fun LeftNavigationRailZone1(
             )
             .border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
             .onFocusChanged { focusState ->
-                isRailExpanded = focusState.hasFocus
+                if (focusState.hasFocus) {
+                    onStageChangedToRail()
+                }
             }
             .padding(vertical = 14.dp, horizontal = 6.dp),
         horizontalAlignment = Alignment.Start
@@ -574,7 +723,6 @@ private fun LeftNavigationRailZone1(
                 .clipToBounds(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Fester 56.dp Slot (perfekt zentriert innerhalb der 68.dp Leiste)
             Box(
                 modifier = Modifier
                     .width(56.dp)
@@ -600,7 +748,6 @@ private fun LeftNavigationRailZone1(
                 }
             }
 
-            // Aufklappender Vollname im Zustand A (Bild 1 & 4)
             Row(
                 modifier = Modifier
                     .graphicsLayer {
@@ -724,7 +871,6 @@ private fun LeftNavigationRailZone1(
             )
         }
 
-        // Flexibler Spacer drückt "Einstellungen" wie in TiviMate (Bild 1–6) ganz nach unten
         Spacer(modifier = Modifier.weight(1f))
 
         // 3. UNTEN VERANKERTER EINSTELLUNGS-BUTTON
@@ -770,9 +916,7 @@ private fun RailIconButton(
             .clipToBounds()
             .background(
                 when {
-                    // Zustand A Fokus-Pille (vgl. Bild 1 & 4) im Obsidian-Neon-Glass-Kontrast
                     isFocused -> AetherColors.CyberCyan.copy(alpha = 0.28f)
-                    // Zustand B Passiver Indikator für das aktive Modul (vgl. Bild 6)
                     isActive -> AetherColors.DeepSpaceNavy.copy(alpha = 0.95f)
                     else -> Color.Transparent
                 }
@@ -795,7 +939,6 @@ private fun RailIconButton(
                             true
                         }
                         Key.DirectionLeft -> {
-                            // Linke Wand: Fokus bricht am linken Rand nicht aus
                             true
                         }
                         Key.DirectionCenter, Key.Enter -> {
@@ -812,7 +955,6 @@ private fun RailIconButton(
             .clickable { onClick() },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Feste 56.dp Icon-Spur: Icon bewegt sich beim Auf-/Zuklappen um 0 Pixel
         Box(
             modifier = Modifier
                 .width(56.dp)
@@ -827,7 +969,6 @@ private fun RailIconButton(
             )
         }
 
-        // Aufklappendes Text-Label rechts neben dem Icon (Zustand A)
         Text(
             text = label,
             color = when {
@@ -961,6 +1102,7 @@ fun TiviMateDetailsPanel(
     playerEngine: AetherVideoPlayerEngine,
     stream: StreamItemEntity?,
     currentEpg: List<EpgProgramEntity>,
+    activeCategoryTitle: String = "",
     modifier: Modifier = Modifier
 ) {
     val techMeta by playerEngine.techMetadata.collectAsState()
@@ -985,7 +1127,7 @@ fun TiviMateDetailsPanel(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.Top,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
@@ -997,14 +1139,31 @@ fun TiviMateDetailsPanel(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    if (stream.isQuickFavorite) {
+
+                    // TiviMate Bild 7 Oben-Rechts-Kontext: Favoriten-Stern + Aktive Kategorie ("DE| SPORTS")
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        modifier = Modifier.padding(start = 12.dp)
+                    ) {
                         Text(
-                            text = "★ FAVORIT",
-                            color = AetherColors.LaserAmber,
-                            fontSize = 11.sp,
+                            text = if (stream.isQuickFavorite) "★" else "☆",
+                            color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.IceBlue.copy(alpha = 0.8f),
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 8.dp)
+                            maxLines = 1,
+                            softWrap = false
                         )
+                        if (activeCategoryTitle.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = activeCategoryTitle,
+                                color = AetherColors.IceBlue,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
 
@@ -1091,9 +1250,9 @@ fun TiviMateDetailsPanel(
             } else {
                 Text(
                     text = when (stream.sectionType) {
-                        AetherSectionType.VOD -> "Drücke [OK] für direkten Vollbild-Start • [MENÜ] für Ordner"
-                        AetherSectionType.SERIES -> "Drücke [OK] für Episoden-Auswahl • [MENÜ] für Ordner"
-                        AetherSectionType.LIVE -> "Drücke [OK] für Wiedergabe / Vollbild • [MENÜ] für Ordner"
+                        AetherSectionType.VOD -> "Drücke [OK] für direkten Vollbild-Start • [LINKS/ZURÜCK] Kategorien"
+                        AetherSectionType.SERIES -> "Drücke [OK] für Episoden-Auswahl • [LINKS/ZURÜCK] Kategorien"
+                        AetherSectionType.LIVE -> "Drücke [OK] für Wiedergabe / Vollbild • [LINKS/ZURÜCK] Kategorien"
                     },
                     color = AetherColors.CyberCyan.copy(alpha = 0.85f),
                     fontSize = 11.sp,
