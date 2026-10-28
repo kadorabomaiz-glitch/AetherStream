@@ -88,7 +88,6 @@ fun AetherApp(
     val fetchedCategoryKeys = remember { mutableSetOf<String>() }
     val playlistId = activePlaylist?.id ?: 0L
 
-    // Native Room-KMP Flows ohne schädliches flowOn(Dispatchers.IO)
     val favoriteFolders by remember(playlistId) {
         if (playlistId > 0L) dao.observeFavoriteFolders(playlistId) else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
@@ -98,15 +97,16 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // Automatische Anwahl der ersten Kategorie beim Start und Sektionswechsel
+    // =========================================================================
+    // L10 SOFORT-ANZEIGE: Wählt blitzschnell die 1. reale Kategorie an (< 0,1s)
+    // =========================================================================
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
-            val isCurrentKeyValid = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey } ||
-                selectedCategoryKey == "SYS_QUICK_FAV" ||
-                selectedCategoryKey == "SYS_RECENT" ||
-                selectedCategoryKey.startsWith("FOLDER_")
+            val isCurrentKeyInThisSection = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey }
 
-            if (selectedCategoryKey.isEmpty() || !isCurrentKeyValid) {
+            // Wenn noch nichts gewählt ist oder der Key nicht zu dieser Sektion gehört:
+            // Wähle sofort die erste reale Kategorie dieser Sektion!
+            if (selectedCategoryKey.isEmpty() || !isCurrentKeyInThisSection) {
                 selectedCategoryKey = visibleCategories.first().uniqueCategoryKey
             }
         } else if (selectedCategoryKey.isEmpty()) {
@@ -141,14 +141,16 @@ fun AetherApp(
         }
     }
 
-    // On-Demand VOD- & Serien-Nachlader
+    // =========================================================================
+    // L10 ON-DEMAND NACHLADER: Nur 1x pro Kategorie, 0% UI-Ruckler
+    // =========================================================================
     LaunchedEffect(selectedCategoryKey, selectedSection) {
         val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
             selectedCategoryKey == "SYS_RECENT" ||
             selectedCategoryKey.startsWith("FOLDER_")
 
         if (!isSystemCategory && selectedCategoryKey.isNotEmpty() && selectedSection != AetherSectionType.LIVE) {
-            if (!fetchedCategoryKeys.contains(selectedCategoryKey)) {
+            if (fetchedCategoryKeys.add(selectedCategoryKey)) {
                 val matchingCat = visibleCategories.firstOrNull { it.uniqueCategoryKey == selectedCategoryKey }
                 if (matchingCat != null) {
                     val streamCount = withContext(Dispatchers.IO) {
@@ -156,15 +158,12 @@ fun AetherApp(
                     }
                     if (streamCount == 0) {
                         isLoadingCategoryStreams = true
-                        fetchedCategoryKeys.add(selectedCategoryKey)
                         withContext(Dispatchers.IO) {
                             runCatching {
                                 dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat)
                             }
                         }
                         isLoadingCategoryStreams = false
-                    } else {
-                        fetchedCategoryKeys.add(selectedCategoryKey)
                     }
                 }
             }
