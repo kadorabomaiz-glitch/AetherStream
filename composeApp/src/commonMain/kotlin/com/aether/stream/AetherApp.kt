@@ -78,11 +78,13 @@ fun AetherApp(
     var selectedCategoryKey by remember { mutableStateOf("") }
     var currentPlayingStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var currentPlayingEpisode by remember { mutableStateOf<SeriesEpisodeEntity?>(null) }
+    var activeParentSeriesKey by remember { mutableStateOf<String?>(null) }
     var activeSeriesForModal by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isCinemaPlayerActive by remember { mutableStateOf(false) }
     var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
 
     var isSearchModalVisible by remember { mutableStateOf(false) }
+    var isSettingsModalVisible by remember { mutableStateOf(false) }
     var isLoadingCategoryStreams by remember { mutableStateOf(false) }
 
     val fetchedCategoryKeys = remember { mutableSetOf<String>() }
@@ -97,15 +99,14 @@ fun AetherApp(
         else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // =========================================================================
-    // L10 SOFORT-ANZEIGE: Wählt blitzschnell die 1. reale Kategorie an (< 0,1s)
-    // =========================================================================
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
-            val isCurrentKeyInThisSection = visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey }
+            val isSystemKey = selectedCategoryKey == "SYS_QUICK_FAV" ||
+                selectedCategoryKey == "SYS_RECENT" ||
+                selectedCategoryKey.startsWith("FOLDER_")
+            val isCurrentKeyInThisSection = isSystemKey ||
+                visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey }
 
-            // Wenn noch nichts gewählt ist oder der Key nicht zu dieser Sektion gehört:
-            // Wähle sofort die erste reale Kategorie dieser Sektion!
             if (selectedCategoryKey.isEmpty() || !isCurrentKeyInThisSection) {
                 selectedCategoryKey = visibleCategories.first().uniqueCategoryKey
             }
@@ -141,9 +142,6 @@ fun AetherApp(
         }
     }
 
-    // =========================================================================
-    // L10 ON-DEMAND NACHLADER: Nur 1x pro Kategorie, 0% UI-Ruckler
-    // =========================================================================
     LaunchedEffect(selectedCategoryKey, selectedSection) {
         val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
             selectedCategoryKey == "SYS_RECENT" ||
@@ -159,9 +157,7 @@ fun AetherApp(
                     if (streamCount == 0) {
                         isLoadingCategoryStreams = true
                         withContext(Dispatchers.IO) {
-                            runCatching {
-                                dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat)
-                            }
+                            runCatching { dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat) }
                         }
                         isLoadingCategoryStreams = false
                     }
@@ -189,6 +185,14 @@ fun AetherApp(
                     durationMs = dur.coerceAtLeast(0L),
                     watchedAt = now
                 )
+                activeParentSeriesKey?.let { seriesKey ->
+                    dao.updateWatchProgress(
+                        uniqueStreamKey = seriesKey,
+                        positionMs = effectivePos,
+                        durationMs = dur.coerceAtLeast(0L),
+                        watchedAt = now
+                    )
+                }
             } else if (st != null && st.sectionType != AetherSectionType.LIVE) {
                 dao.updateWatchProgress(
                     uniqueStreamKey = st.uniqueStreamKey,
@@ -200,7 +204,6 @@ fun AetherApp(
         }
     }
 
-    // 5-Sekunden-Ticker nur für VOD und Serien
     val isEnginePlaying by playerEngine.isPlaying.collectAsState()
     LaunchedEffect(isEnginePlaying, isCinemaPlayerActive, currentPlayingStream?.uniqueStreamKey, currentPlayingEpisode?.uniqueEpisodeKey) {
         if (isEnginePlaying && isCinemaPlayerActive) {
@@ -257,9 +260,6 @@ fun AetherApp(
                 )
             }
 
-            // ============================================================
-            // TIVIMATE 4-ZONEN DUAL COCKPIT (SOFORTSTART MIT 0ms LATENZ)
-            // ============================================================
             is AetherScreen.LiveTv, is AetherScreen.Dashboard, is AetherScreen.VodMovies, is AetherScreen.Series -> {
                 LiveTvDualCockpitScreen(
                     playerEngine = playerEngine,
@@ -283,13 +283,24 @@ fun AetherApp(
                     },
                     onSelectCategory = { selectedCategoryKey = it },
                     onSelectStream = { stream ->
-                        // L10 SOFORTSTART: 0ms Datenbank-Latenz, kein blockierender Write!
                         currentPlayingEpisode = null
+                        activeParentSeriesKey = null
                         currentPlayingStream = stream
                         val isVod = (stream.sectionType == AetherSectionType.VOD)
                         isCinemaPlayerActive = isVod
                         val startPos = if (isVod) stream.resumePositionMs.coerceAtLeast(0L) else 0L
                         playerEngine.playStream(stream.streamUrl, startPos)
+
+                        if (isVod) {
+                            scope.launch(Dispatchers.IO) {
+                                dao.updateWatchProgress(
+                                    uniqueStreamKey = stream.uniqueStreamKey,
+                                    positionMs = startPos,
+                                    durationMs = stream.totalDurationMs.coerceAtLeast(0L),
+                                    watchedAt = Clock.System.now().toEpochMilliseconds()
+                                )
+                            }
+                        }
                     },
                     onOpenSeriesCockpit = { seriesItem ->
                         activeSeriesForModal = seriesItem
@@ -303,7 +314,7 @@ fun AetherApp(
                         folderDialogTargetStream = stream
                     },
                     onOpenSettings = {
-                        navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
+                        isSettingsModalVisible = true
                     },
                     onOpenSearch = {
                         isSearchModalVisible = true
@@ -344,37 +355,42 @@ fun AetherApp(
             }
         }
 
-        // ============================================================
-        // MODALES SERIEN-COCKPIT (Volle 1080dp TV-Breite)
-        // ============================================================
         activeSeriesForModal?.let { seriesItem ->
             AetherSeriesDetailModal(
                 seriesItem = seriesItem,
                 dao = dao,
                 onFetchEpisodes = { dashboardViewModel.fetchSeriesEpisodesOnDemand(seriesItem) },
                 onPlayEpisode = { episode, resume ->
+                    val parentSeries = seriesItem
                     activeSeriesForModal = null
                     isCinemaPlayerActive = true
                     currentPlayingEpisode = episode
-                    val displayTitle = if (episode.title.contains(seriesItem.name, ignoreCase = true)) {
+                    activeParentSeriesKey = parentSeries.uniqueStreamKey
+                    val displayTitle = if (episode.title.contains(parentSeries.name, ignoreCase = true)) {
                         episode.title
                     } else {
-                        "${seriesItem.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
+                        "${parentSeries.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
                     }
-                    currentPlayingStream = seriesItem.copy(
+                    currentPlayingStream = parentSeries.copy(
                         name = displayTitle,
                         streamUrl = episode.streamUrl
                     )
                     val startPos = if (resume) episode.resumePositionMs.coerceAtLeast(0L) else 0L
                     playerEngine.playStream(episode.streamUrl, startPos)
+
+                    scope.launch(Dispatchers.IO) {
+                        dao.updateWatchProgress(
+                            uniqueStreamKey = parentSeries.uniqueStreamKey,
+                            positionMs = startPos,
+                            durationMs = episode.durationMs.coerceAtLeast(0L),
+                            watchedAt = Clock.System.now().toEpochMilliseconds()
+                        )
+                    }
                 },
                 onDismiss = { activeSeriesForModal = null }
             )
         }
 
-        // ============================================================
-        // GLOBALE SUCHE MODAL (Natives Room-KMP)
-        // ============================================================
         if (isSearchModalVisible) {
             AetherGlobalSearchModal(
                 dao = dao,
@@ -388,18 +404,54 @@ fun AetherApp(
                         }
                         AetherSectionType.VOD -> {
                             currentPlayingEpisode = null
+                            activeParentSeriesKey = null
                             currentPlayingStream = stream
                             isCinemaPlayerActive = true
-                            playerEngine.playStream(stream.streamUrl, stream.resumePositionMs.coerceAtLeast(0L))
+                            val startPos = stream.resumePositionMs.coerceAtLeast(0L)
+                            playerEngine.playStream(stream.streamUrl, startPos)
+                            scope.launch(Dispatchers.IO) {
+                                dao.updateWatchProgress(
+                                    uniqueStreamKey = stream.uniqueStreamKey,
+                                    positionMs = startPos,
+                                    durationMs = stream.totalDurationMs.coerceAtLeast(0L),
+                                    watchedAt = Clock.System.now().toEpochMilliseconds()
+                                )
+                            }
                         }
                         AetherSectionType.LIVE -> {
                             currentPlayingEpisode = null
+                            activeParentSeriesKey = null
                             currentPlayingStream = stream
                             isCinemaPlayerActive = false
                             playerEngine.playStream(stream.streamUrl, 0L)
                         }
                     }
                 }
+            )
+        }
+
+        if (isSettingsModalVisible) {
+            AetherTiviMateSettingsModal(
+                activePlaylistName = activePlaylist?.playlistName ?: "Aktive Playlist",
+                currentPreset = navState.bufferPreset,
+                onSelectBufferPreset = { preset ->
+                    navigationViewModel.updateBufferPreset(preset)
+                    playerEngine.applyBufferPreset(preset)
+                },
+                onTriggerManualSync = {
+                    isSettingsModalVisible = false
+                    fetchedCategoryKeys.clear()
+                    dashboardViewModel.triggerManualSync()
+                },
+                onOpenPlaylistSetup = {
+                    isSettingsModalVisible = false
+                    navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
+                },
+                onOpenAdminPinPanel = {
+                    isSettingsModalVisible = false
+                    navigationViewModel.openSecretAdminPanel()
+                },
+                onDismiss = { isSettingsModalVisible = false }
             )
         }
 
@@ -454,6 +506,131 @@ fun AetherApp(
 }
 
 @Composable
+private fun AetherTiviMateSettingsModal(
+    activePlaylistName: String,
+    currentPreset: StreamBufferPreset,
+    onSelectBufferPreset: (StreamBufferPreset) -> Unit,
+    onTriggerManualSync: () -> Unit,
+    onOpenPlaylistSetup: () -> Unit,
+    onOpenAdminPinPanel: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(860.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(AetherColors.DeepSpaceNavy)
+                .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
+                .padding(26.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "⚙️ AETHER STREAM EINSTELLUNGEN",
+                            color = AetherColors.CyberCyan,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Aktive Playlist: $activePlaylistName",
+                            color = AetherColors.IceBlue.copy(alpha = 0.8f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 8.dp) {
+                        Text(
+                            text = "SCHLIESSEN ✕",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "1. STREAM-PUFFER PRESET (LOW-LATENCY ZAPPING VS. STABILITÄT)",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(StreamBufferPreset.entries, key = { it.name }) { preset ->
+                            val isSelected = preset == currentPreset
+                            AetherFocusableGlassCard(
+                                onClick = { onSelectBufferPreset(preset) },
+                                isSelected = isSelected,
+                                cornerRadius = 10.dp
+                            ) {
+                                Text(
+                                    text = if (isSelected) "✓ ${preset.name}" else preset.name,
+                                    color = if (isSelected) AetherColors.CyberCyan else Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "2. PLAYLIST, SYNCHRONISATION & SICHERHEIT",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    AetherFocusableGlassCard(onClick = onTriggerManualSync, cornerRadius = 10.dp, modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔄 Playlist & Kategorien jetzt vom Server synchronisieren", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("STARTEN ▶", color = AetherColors.NeonEmerald, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+
+                    AetherFocusableGlassCard(onClick = onOpenPlaylistSetup, cornerRadius = 10.dp, modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("📡 Xtream Codes Zugangsdaten / Server-URL bearbeiten", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("ÖFFNEN ▶", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+
+                    AetherFocusableGlassCard(onClick = onOpenAdminPinPanel, cornerRadius = 10.dp, modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔒 Kindersicherung / Ghost-Vault PIN & Admin-Panel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("VERWALTEN ▶", color = AetherColors.LaserAmber, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AetherSeriesDetailModal(
     seriesItem: StreamItemEntity,
     dao: AetherDao,
@@ -486,11 +663,8 @@ private fun AetherSeriesDetailModal(
 
     val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
         val season = selectedSeason
-        if (season != null) {
-            dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
-        } else {
-            flowOf(emptyList())
-        }
+        if (season != null) dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
+        else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
     Dialog(
@@ -506,23 +680,12 @@ private fun AetherSeriesDetailModal(
                 .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
                 .padding(26.dp)
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .width(320.dp)
-                        .fillMaxHeight(),
-                    verticalArrangement = Arrangement.SpaceBetween
-                ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp), modifier = Modifier.fillMaxSize()) {
+                Column(modifier = Modifier.width(320.dp).fillMaxHeight(), verticalArrangement = Arrangement.SpaceBetween) {
                     Column {
                         Text(
                             text = seriesItem.name,
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                color = AetherColors.CyberCyan,
-                                fontWeight = FontWeight.Bold
-                            ),
+                            style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan, fontWeight = FontWeight.Bold),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -549,34 +712,21 @@ private fun AetherSeriesDetailModal(
                     }
                 }
 
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                ) {
+                Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     if (isLoadingEpisodes) {
                         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 CircularProgressIndicator(color = AetherColors.CyberCyan)
                                 Spacer(modifier = Modifier.height(16.dp))
-                                Text(
-                                    text = "Lade Staffeln & Episoden vom Xtream-Server...",
-                                    style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan)
-                                )
+                                Text("Lade Staffeln & Episoden vom Xtream-Server...", style = MaterialTheme.typography.titleMedium.copy(color = AetherColors.CyberCyan))
                             }
                         }
                     } else if (availableSeasons.isEmpty()) {
                         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                            Text(
-                                text = "Keine Episoden für diese Serie gefunden.",
-                                style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary)
-                            )
+                            Text("Keine Episoden für diese Serie gefunden.", style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary))
                         }
                     } else {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                             items(availableSeasons, key = { it }) { seasonNum ->
                                 val isSelected = selectedSeason == seasonNum
                                 AetherFocusableGlassCard(
@@ -598,12 +748,7 @@ private fun AetherSeriesDetailModal(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        LazyColumn(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
-                        ) {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
                             items(episodesForSeason, key = { it.uniqueEpisodeKey }) { ep ->
                                 val hasResume = ep.resumePositionMs > 10_000L
                                 AetherFocusableGlassCard(
@@ -614,9 +759,7 @@ private fun AetherSeriesDetailModal(
                                     Row(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(12.dp)
+                                        modifier = Modifier.fillMaxWidth().padding(12.dp)
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
@@ -644,10 +787,7 @@ private fun AetherSeriesDetailModal(
                                                     progress = { progress },
                                                     color = AetherColors.CyberCyan,
                                                     trackColor = AetherColors.DeepSpaceNavy,
-                                                    modifier = Modifier
-                                                        .fillMaxWidth(0.5f)
-                                                        .height(4.dp)
-                                                        .clip(RoundedCornerShape(2.dp))
+                                                    modifier = Modifier.fillMaxWidth(0.5f).height(4.dp).clip(RoundedCornerShape(2.dp))
                                                 )
                                             }
                                         }
@@ -657,10 +797,7 @@ private fun AetherSeriesDetailModal(
                                         Box(
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(6.dp))
-                                                .background(
-                                                    if (hasResume) AetherColors.NeonEmerald.copy(alpha = 0.2f)
-                                                    else AetherColors.CyberCyan.copy(alpha = 0.2f)
-                                                )
+                                                .background(if (hasResume) AetherColors.NeonEmerald.copy(alpha = 0.2f) else AetherColors.CyberCyan.copy(alpha = 0.2f))
                                                 .padding(horizontal = 10.dp, vertical = 6.dp)
                                         ) {
                                             Text(
@@ -691,13 +828,13 @@ private fun AetherGlobalSearchModal(
     var queryText by remember { mutableStateOf("") }
     var debouncedQuery by remember { mutableStateOf("") }
 
-    val focusRequester = remember { FocusRequester() }
+    val firstKeyFocusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) {
-        runCatching { focusRequester.requestFocus() }
+        runCatching { firstKeyFocusRequester.requestFocus() }
     }
 
     LaunchedEffect(queryText) {
-        delay(350L)
+        delay(280L)
         debouncedQuery = queryText.trim()
     }
 
@@ -709,30 +846,35 @@ private fun AetherGlobalSearchModal(
         }
     }.collectAsState(initial = emptyList())
 
+    val quickKeys = remember {
+        listOf(
+            "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+            "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "LEER", "⌫", "CLR"
+        )
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
             modifier = Modifier
-                .width(960.dp)
-                .height(600.dp)
+                .width(1020.dp)
+                .height(640.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .background(AetherColors.DeepSpaceNavy)
                 .border(1.5.dp, AetherColors.CyberCyan.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
                 .padding(24.dp)
         ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
+            Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "GLOBALE SUCHE (LIVE TV, VOD & SERIEN)",
+                        text = "🔍 GLOBALE SUCHE (LIVE TV, FILME & SERIEN)",
                         color = AetherColors.CyberCyan,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.ExtraBold
@@ -752,11 +894,9 @@ private fun AetherGlobalSearchModal(
                 OutlinedTextField(
                     value = queryText,
                     onValueChange = { queryText = it },
-                    label = { Text("Titel oder Kanal suchen...") },
+                    label = { Text("Suchbegriff (Fernbedienungs-Leiste unten oder Systemtastatur)...") },
                     singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
+                    modifier = Modifier.fillMaxWidth(),
                     colors = TextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
@@ -765,31 +905,50 @@ private fun AetherGlobalSearchModal(
                     )
                 )
 
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(quickKeys.size) { idx ->
+                        val keyLabel = quickKeys[idx]
+                        val keyMod = if (idx == 0) Modifier.focusRequester(firstKeyFocusRequester) else Modifier
+                        AetherFocusableGlassCard(
+                            onClick = {
+                                when (keyLabel) {
+                                    "LEER" -> queryText += " "
+                                    "⌫" -> if (queryText.isNotEmpty()) queryText = queryText.dropLast(1)
+                                    "CLR" -> queryText = ""
+                                    else -> queryText += keyLabel
+                                }
+                            },
+                            cornerRadius = 6.dp,
+                            modifier = keyMod
+                        ) { isFocused ->
+                            Text(
+                                text = keyLabel,
+                                color = if (isFocused) AetherColors.CyberCyan else Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            )
+                        }
+                    }
+                }
+
                 Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     when {
                         debouncedQuery.length < 2 -> {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "Gib mindestens 2 Zeichen ein, um zu suchen.",
-                                    color = AetherColors.TextSecondary,
-                                    fontSize = 14.sp
-                                )
+                                Text("Wähle oben mindestens 2 Buchstaben aus, um Live-TV, Filme & Serien zu durchsuchen.", color = AetherColors.TextSecondary, fontSize = 14.sp)
                             }
                         }
                         searchResults.isEmpty() -> {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "Keine Treffer für „$debouncedQuery“ gefunden.",
-                                    color = AetherColors.IceBlue,
-                                    fontSize = 14.sp
-                                )
+                                Text("Keine Treffer für „$debouncedQuery“ gefunden.", color = AetherColors.IceBlue, fontSize = 14.sp)
                             }
                         }
                         else -> {
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
+                            LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(searchResults, key = { it.uniqueStreamKey }) { item ->
                                     AetherFocusableGlassCard(
                                         onClick = { onSelectStream(item) },
@@ -797,22 +956,16 @@ private fun AetherGlobalSearchModal(
                                         modifier = Modifier.fillMaxWidth()
                                     ) { isFocused ->
                                         Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.weight(1f)
-                                            ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                                                 val (tag, tagColor) = when (item.sectionType) {
                                                     AetherSectionType.LIVE -> "TV" to AetherColors.CyberCyan
-                                                    AetherSectionType.VOD -> "VOD" to AetherColors.NeonEmerald
+                                                    AetherSectionType.VOD -> "FILM" to AetherColors.NeonEmerald
                                                     AetherSectionType.SERIES -> "SERIE" to AetherColors.LaserAmber
                                                 }
-
                                                 Box(
                                                     modifier = Modifier
                                                         .clip(RoundedCornerShape(4.dp))
@@ -820,16 +973,9 @@ private fun AetherGlobalSearchModal(
                                                         .border(1.dp, tagColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                                 ) {
-                                                    Text(
-                                                        text = tag,
-                                                        color = tagColor,
-                                                        fontSize = 10.sp,
-                                                        fontWeight = FontWeight.ExtraBold
-                                                    )
+                                                    Text(tag, color = tagColor, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
                                                 }
-
                                                 Spacer(modifier = Modifier.width(10.dp))
-
                                                 Text(
                                                     text = item.name,
                                                     color = if (isFocused) Color.White else AetherColors.TextPrimary,
@@ -839,13 +985,7 @@ private fun AetherGlobalSearchModal(
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                             }
-
-                                            Text(
-                                                text = "▶ Starten",
-                                                color = AetherColors.CyberCyan,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
+                                            Text("▶ Starten", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                         }
                                     }
                                 }
