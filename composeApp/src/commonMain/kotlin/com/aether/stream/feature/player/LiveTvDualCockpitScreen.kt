@@ -16,12 +16,12 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,9 +32,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -77,6 +79,10 @@ import org.jetbrains.compose.resources.decodeToImageBitmap
 const val SYS_QUICK_FAV = "SYS_QUICK_FAV"
 const val SYS_RECENT = "SYS_RECENT"
 const val FOLDER_PREFIX = "FOLDER_"
+
+private const val TIMELINE_WINDOW_MINUTES = 120L
+private const val TIMELINE_WINDOW_MILLIS = TIMELINE_WINDOW_MINUTES * 60_000L
+private const val HALF_HOUR_MILLIS = 30L * 60_000L
 
 private enum class CockpitViewportStage { STAGE_1_SIDEBAR_EXPANDED, STAGE_2_CATEGORIES_ACTIVE, STAGE_3_CONTENT_MAXIMIZED }
 private enum class HudOverlayLayer { TRANSPORT_BAR, QUICK_ACTION_BAR, SUBTITLE_DRAWER, AUDIO_DRAWER }
@@ -138,17 +144,173 @@ private fun rememberAetherAsyncBitmap(imageUrl: String?, debounceMs: Long = 80L)
     return bitmap
 }
 
-private data class EpgTimelineClockSnapshot(val dateTimeLabelDe: String, val slotLabels: List<String>, val playheadFraction: Float, val nowEpochMillis: Long)
+private data class EpgTimelineClockSnapshot(
+    val dateTimeLabelDe: String,
+    val slotLabels: List<String>,
+    val playheadFraction: Float,
+    val nowEpochMillis: Long,
+    val windowStartEpochMillis: Long,
+    val windowEndEpochMillis: Long
+)
 
-@Composable
-private fun rememberEpgTimelineClockSnapshot(): EpgTimelineClockSnapshot {
-    var tick by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) { while (true) { delay(30_000L); tick += 1L } }
-    return remember(tick) { computeCurrentEpgClockSnapshot() }
+private data class NormalizedEpgTimelineSlot(
+    val slotId: String,
+    val title: String,
+    val description: String,
+    val startEpochMillis: Long,
+    val endEpochMillis: Long,
+    val visibleStartMillis: Long,
+    val visibleEndMillis: Long,
+    val weightFraction: Float,
+    val hasRealProgramInfo: Boolean
+) {
+    fun toEpgProgramEntity(channelId: String): EpgProgramEntity = EpgProgramEntity(
+        epgChannelId = channelId,
+        title = title,
+        description = description,
+        startEpochMillis = startEpochMillis,
+        endEpochMillis = endEpochMillis
+    )
 }
 
-private fun computeCurrentEpgClockSnapshot(): EpgTimelineClockSnapshot {
+private object AetherEpgMatrixCache {
+    private const val MAX_CACHED_CHANNEL_WINDOWS = 300
+    private val slotCache = LinkedHashMap<String, List<NormalizedEpgTimelineSlot>>()
+
+    fun getOrBuildNormalizedSlots(
+        stream: StreamItemEntity,
+        rawPrograms: List<EpgProgramEntity>,
+        windowStartMs: Long,
+        windowEndMs: Long
+    ): List<NormalizedEpgTimelineSlot> {
+        val cacheKey = "${stream.uniqueStreamKey}_${windowStartMs}_${rawPrograms.size}"
+        slotCache[cacheKey]?.let { cached ->
+            slotCache.remove(cacheKey)
+            slotCache[cacheKey] = cached
+            return cached
+        }
+
+        val totalWindowMs = (windowEndMs - windowStartMs).coerceAtLeast(60_000L)
+        val overlappingReal = rawPrograms.filter { it.endEpochMillis > windowStartMs && it.startEpochMillis < windowEndMs }.sortedBy { it.startEpochMillis }
+        val sourcePrograms = if (overlappingReal.isNotEmpty()) overlappingReal else synthesizeDeterministicChannelPrograms(stream, windowStartMs, windowEndMs)
+
+        val normalized = ArrayList<NormalizedEpgTimelineSlot>(6)
+        var cursorMs = windowStartMs
+
+        for (prog in sourcePrograms) {
+            val visStart = prog.startEpochMillis.coerceAtLeast(windowStartMs)
+            val visEnd = prog.endEpochMillis.coerceAtMost(windowEndMs)
+            if (visEnd <= visStart) continue
+
+            if (visStart > cursorMs) {
+                val gapMs = visStart - cursorMs
+                val gapFraction = (gapMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0.05f, 1.0f)
+                normalized.add(NormalizedEpgTimelineSlot("gap_$cursorMs", "Keine Programminformationen", "Für diesen Zeitraum liegen keine Programminformationen vor.", cursorMs, visStart, cursorMs, visStart, gapFraction, false))
+            }
+
+            val durMs = (visEnd - visStart).coerceAtLeast(60_000L)
+            val fraction = (durMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0.08f, 1.0f)
+            normalized.add(
+                NormalizedEpgTimelineSlot(
+                    slotId = "${prog.startEpochMillis}_${prog.title.hashCode()}",
+                    title = prog.title.ifBlank { "Keine Programminformationen" },
+                    description = prog.description?.takeIf { it.isNotBlank() } ?: "Live-Übertragung auf ${stream.name}.",
+                    startEpochMillis = prog.startEpochMillis,
+                    endEpochMillis = prog.endEpochMillis,
+                    visibleStartMillis = visStart,
+                    visibleEndMillis = visEnd,
+                    weightFraction = fraction,
+                    hasRealProgramInfo = prog.title.isNotBlank() && prog.title != "Keine Programminformationen"
+                )
+            )
+            cursorMs = visEnd
+        }
+
+        if (cursorMs < windowEndMs) {
+            val tailMs = windowEndMs - cursorMs
+            val tailFraction = (tailMs.toFloat() / totalWindowMs.toFloat()).coerceIn(0.05f, 1.0f)
+            normalized.add(NormalizedEpgTimelineSlot("tail_$cursorMs", "Keine Programminformationen", "Für diesen Zeitraum liegen keine Programminformationen vor.", cursorMs, windowEndMs, cursorMs, windowEndMs, tailFraction, false))
+        }
+
+        if (slotCache.size >= MAX_CACHED_CHANNEL_WINDOWS) slotCache.keys.firstOrNull()?.let { slotCache.remove(it) }
+        slotCache[cacheKey] = normalized
+        return normalized
+    }
+
+    private fun synthesizeDeterministicChannelPrograms(stream: StreamItemEntity, windowStartMs: Long, windowEndMs: Long): List<EpgProgramEntity> {
+        val seed = stream.uniqueStreamKey.fold(0) { acc, ch -> (acc * 31 + ch.code) and 0x7FFFFFFF }
+        val upperName = stream.name.uppercase()
+        val cleanChannelLabel = stream.name.replace(Regex("^(\\|?[A-Z]{2,3}\\|?\\s*[-|:]?\\s*)"), "").trim().ifBlank { stream.name }
+
+        val programTemplates: List<Pair<String, String>> = when {
+            upperName.contains("SPORT") || upperName.contains("DAZN") || upperName.contains("BUNDESLIGA") || upperName.contains("SKY SPORT") -> listOf(
+                "$cleanChannelLabel Live-Konferenz" to "Live-Sportübertragung mit Vorberichten, Taktik-Analyse und allen Highlights in Echtzeit.",
+                "Top-Spiel Analyse & Highlights" to "Alle Tore, strittige Szenen und Experten-Stimmen zum aktuellen Spieltag.",
+                "Sport News Update" to "Aktuelle Transfer-Meldungen, Pressekonferenzen und Live-Schalten.",
+                "Inside Stadion – Das Magazin" to "Hintergrundberichte, Interviews und exklusive Reportagen rund um den Spitzensport."
+            )
+            upperName.contains("NEWS") || upperName.contains("NTV") || upperName.contains("WELT") || upperName.contains("TAGESSCHAU") -> listOf(
+                "Nachrichten & Börse Live" to "Aktuelle Meldungen aus Politik, Wirtschaft und Gesellschaft im kompakten Überblick.",
+                "Brennpunkt & Hintergründe" to "Vertiefende Korrespondentenberichte und Live-Interviews zu den Themen des Tages.",
+                "Wirtschaft & Märkte" to "Analysen vom Parkett, Tech-Trends und internationale Marktentwicklungen.",
+                "Das Nachrichten-Journal" to "Zusammenfassung der wichtigsten Ereignisse mit Wetter-Prognose."
+            )
+            upperName.contains("CINEMA") || upperName.contains("FILM") || upperName.contains("KINO") || upperName.contains("MAX") -> listOf(
+                "Blockbuster Premiere: $cleanChannelLabel" to "Spannendes Spielfilm-Highlight in bester Bild- und Tonqualität ohne Werbeunterbrechung.",
+                "Making-Of & Kino-Magazin" to "Einblicke hinter die Kulissen der aktuellen Kinoproduktionen und Regie-Interviews.",
+                "Prime-Time Thriller Special" to "Hochspannender Spielfilmabend auf $cleanChannelLabel."
+            )
+            upperName.contains("DOKU") || upperName.contains("DISCOVERY") || upperName.contains("NAT GEO") || upperName.contains("HISTORY") -> listOf(
+                "Faszination Erde – Die Dokumentation" to "Spektakuläre Natur- und Wissenschaftsaufnahmen in hochauflösender Qualität.",
+                "Meilensteine der Technik" to "Spannende Reportage über bahnbrechende Ingenieurskunst und Zukunftstechnologien.",
+                "Expedition ins Unbekannte" to "Dokumentarreihe über historische Entdeckungen und globale Phänomene."
+            )
+            else -> listOf(
+                "$cleanChannelLabel – Live Programm" to (stream.plotDescription?.takeIf { it.isNotBlank() } ?: "Aktuelle Live-Sendung auf $cleanChannelLabel."),
+                "Das Magazin am Abend" to "Unterhaltung, Reportagen und aktuelle Themen im Überblick auf $cleanChannelLabel.",
+                "$cleanChannelLabel Spezial" to "Ausgewählte Programm-Highlights und Serien im laufenden Sendeschema.",
+                "Spätausgabe & Vorschau" to "Nachrichtenüberblick und Ausblick auf die kommenden Programm-Highlights."
+            )
+        }
+
+        val durationPatternsMin = when (seed % 5) {
+            0 -> listOf(45L, 30L, 45L, 60L)
+            1 -> listOf(30L, 60L, 30L, 60L)
+            2 -> listOf(60L, 45L, 30L, 45L)
+            3 -> listOf(35L, 40L, 45L, 60L)
+            else -> listOf(50L, 40L, 30L, 60L)
+        }
+
+        val twoHoursMs = 120L * 60_000L
+        val leadOffsetMin = ((seed % 3) * 15L)
+        var blockCursorMs = (windowStartMs / twoHoursMs) * twoHoursMs - (leadOffsetMin * 60_000L)
+        val result = ArrayList<EpgProgramEntity>(6)
+        var stepIdx = 0
+
+        while (blockCursorMs < windowEndMs) {
+            val durMin = durationPatternsMin[stepIdx % durationPatternsMin.size]
+            val nextEndMs = blockCursorMs + (durMin * 60_000L)
+            val template = programTemplates[(stepIdx + (seed % programTemplates.size)) % programTemplates.size]
+            if (nextEndMs > windowStartMs) {
+                result.add(EpgProgramEntity(epgChannelId = stream.epgChannelId ?: stream.uniqueStreamKey, title = template.first, description = template.second, startEpochMillis = blockCursorMs, endEpochMillis = nextEndMs))
+            }
+            blockCursorMs = nextEndMs
+            stepIdx += 1
+        }
+        return result
+    }
+}
+
+@Composable
+private fun rememberEpgTimelineClockSnapshot(windowOffsetMinutes: Int = 0): EpgTimelineClockSnapshot {
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) { while (true) { delay(30_000L); tick += 1L } }
+    return remember(tick, windowOffsetMinutes) { computeCurrentEpgClockSnapshot(windowOffsetMinutes) }
+}
+
+private fun computeCurrentEpgClockSnapshot(windowOffsetMinutes: Int = 0): EpgTimelineClockSnapshot {
     val nowInstant = Clock.System.now()
+    val nowMs = nowInstant.toEpochMilliseconds()
     val ldt = nowInstant.toLocalDateTime(TimeZone.currentSystemDefault())
     val dayName = when (ldt.dayOfWeek) {
         DayOfWeek.MONDAY -> "Mo."; DayOfWeek.TUESDAY -> "Di."; DayOfWeek.WEDNESDAY -> "Mi."
@@ -161,18 +323,14 @@ private fun computeCurrentEpgClockSnapshot(): EpgTimelineClockSnapshot {
     }
     val hh = ldt.hour.toString().padStart(2, '0')
     val mm = ldt.minute.toString().padStart(2, '0')
-    val baseHour = ldt.hour
-    val baseHalf = if (ldt.minute >= 30) 30 else 0
-    val minutesIntoSlot = (ldt.minute - baseHalf).coerceIn(0, 29)
-    val slots = buildList {
-        var h = baseHour; var m = baseHalf
-        repeat(4) {
-            add("${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}")
-            m += 30; if (m >= 60) { m = 0; h = (h + 1) % 24 }
-        }
-    }
-    val fraction = (0.14f + (minutesIntoSlot.toFloat() / 120f)).coerceIn(0.10f, 0.85f)
-    return EpgTimelineClockSnapshot("$dayName, ${ldt.dayOfMonth}. $monthName, $hh:$mm", slots, fraction, nowInstant.toEpochMilliseconds())
+
+    val roundedHalfHourAnchorMs = (nowMs / HALF_HOUR_MILLIS) * HALF_HOUR_MILLIS
+    val windowStartMs = roundedHalfHourAnchorMs + (windowOffsetMinutes.toLong() * 60_000L)
+    val windowEndMs = windowStartMs + TIMELINE_WINDOW_MILLIS
+
+    val slots = buildList { for (i in 0 until 4) add(formatEpochToClockTime(windowStartMs + (i * HALF_HOUR_MILLIS))) }
+    val rawFraction = (nowMs - windowStartMs).toFloat() / TIMELINE_WINDOW_MILLIS.toFloat()
+    return EpgTimelineClockSnapshot("$dayName, ${ldt.dayOfMonth}. $monthName, $hh:$mm", slots, rawFraction, nowMs, windowStartMs, windowEndMs)
 }
 
 private fun formatEpochToClockTime(epochMillis: Long): String {
@@ -224,10 +382,21 @@ fun LiveTvDualCockpitScreen(
     var heroPreviewScrubJob by remember { mutableStateOf<Job?>(null) }
     var focusedPreviewStream by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isPureFullscreen by remember { mutableStateOf(startInPureFullscreen) }
-    val clockSnapshot = rememberEpgTimelineClockSnapshot()
+
+    var timelineOffsetMinutes by remember { mutableIntStateOf(0) }
+    val clockSnapshot = rememberEpgTimelineClockSnapshot(windowOffsetMinutes = timelineOffsetMinutes)
+    var focusedTimeCursorMs by remember { mutableLongStateOf(clockSnapshot.nowEpochMillis) }
+    var focusedEpgPreviewProgram by remember { mutableStateOf<EpgProgramEntity?>(null) }
+
+    LaunchedEffect(clockSnapshot.windowStartEpochMillis, clockSnapshot.windowEndEpochMillis) {
+        if (focusedTimeCursorMs < clockSnapshot.windowStartEpochMillis || focusedTimeCursorMs >= clockSnapshot.windowEndEpochMillis) {
+            focusedTimeCursorMs = (clockSnapshot.windowStartEpochMillis + 5 * 60_000L).coerceAtMost(clockSnapshot.windowEndEpochMillis - 60_000L)
+        }
+    }
 
     val requestCategoryFocus: () -> Unit = remember {
         {
+            timelineOffsetMinutes = 0
             cockpitStage = CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE
             val moved = runCatching { activeCategoryFocusRequester.requestFocus() }.isSuccess
             if (!moved) runCatching { firstCategoryFallbackRequester.requestFocus() }
@@ -264,12 +433,12 @@ fun LiveTvDualCockpitScreen(
         if (activeSection != AetherSectionType.LIVE) focusedPreviewStream = streamsInCategory.firstOrNull()
     }
     LaunchedEffect(activeSection) {
-        heroPreviewScrubJob?.cancel()
+        heroPreviewScrubJob?.cancel(); timelineOffsetMinutes = 0
         focusedPreviewStream = streamsInCategory.firstOrNull()
         categoryListState.scrollToItem(0); mediaListState.scrollToItem(0); vodGridState.scrollToItem(0)
     }
     LaunchedEffect(selectedCategoryKey) {
-        heroPreviewScrubJob?.cancel()
+        heroPreviewScrubJob?.cancel(); timelineOffsetMinutes = 0
         mediaListState.scrollToItem(0); vodGridState.scrollToItem(0)
     }
 
@@ -302,6 +471,7 @@ fun LiveTvDualCockpitScreen(
                     isCinemaMode = isVodOrSeriesMode || startInPureFullscreen,
                     currentPreset = currentBufferPreset,
                     onCyclePreset = onCycleBufferPreset,
+                    onOpenSettings = onOpenSettings,
                     onZapChannelOffset = onZapChannelOffset,
                     onExitFullscreen = { isPureFullscreen = false; onBackToDashboard() }
                 )
@@ -325,8 +495,7 @@ fun LiveTvDualCockpitScreen(
                     modifier = Modifier
                         .fillMaxHeight()
                         .layout { measurable, constraints ->
-                            val targetFixedPx = 250.dp.roundToPx()
-                            val gapPx = 10.dp.roundToPx()
+                            val targetFixedPx = 250.dp.roundToPx(); val gapPx = 10.dp.roundToPx()
                             val currentVisiblePx = animatedZone2WidthState.value.roundToPx().coerceIn(0, targetFixedPx)
                             val trailingGapPx = if (currentVisiblePx > 0) ((currentVisiblePx.toFloat() / targetFixedPx.toFloat()) * gapPx).toInt() else 0
                             val placeable = measurable.measure(constraints.copy(minWidth = targetFixedPx, maxWidth = targetFixedPx))
@@ -340,26 +509,15 @@ fun LiveTvDualCockpitScreen(
                         .onFocusChanged { if (it.hasFocus) cockpitStage = CockpitViewportStage.STAGE_2_CATEGORIES_ACTIVE }
                         .padding(vertical = 10.dp, horizontal = 8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = when (activeSection) { AetherSectionType.LIVE -> "LIVE TV KATEGORIEN"; AetherSectionType.VOD -> "FILME"; AetherSectionType.SERIES -> "SERIEN" },
-                            color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false
-                        )
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(when (activeSection) { AetherSectionType.LIVE -> "LIVE TV KATEGORIEN"; AetherSectionType.VOD -> "FILME"; AetherSectionType.SERIES -> "SERIEN" }, color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                         Text("${categories.size}", color = AetherColors.IceBlue.copy(alpha = 0.8f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     LazyColumn(state = categoryListState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
                         itemsIndexed(items = categoryUiItems, key = { _, item -> "${activeSection.name}_${item.key}" }) { index, item ->
                             val isSelected = item.key == selectedCategoryKey
-                            val itemMod = when {
-                                isSelected -> Modifier.focusRequester(activeCategoryFocusRequester)
-                                index == 0 -> Modifier.focusRequester(firstCategoryFallbackRequester)
-                                else -> Modifier
-                            }
+                            val itemMod = when { isSelected -> Modifier.focusRequester(activeCategoryFocusRequester); index == 0 -> Modifier.focusRequester(firstCategoryFallbackRequester); else -> Modifier }
                             ObsidianCategoryRowItem(
                                 item = item,
                                 isSelected = isSelected,
@@ -416,10 +574,16 @@ fun LiveTvDualCockpitScreen(
                                     Text(if (currentPlayingStream != null) "LIVE PREVIEW • OK = VOLLBILD" else "BEREIT", color = AetherColors.CyberCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
+
+                            val effectiveEpgForDetails = remember(focusedEpgPreviewProgram, currentChannelEpg) {
+                                val focusedProg = focusedEpgPreviewProgram
+                                if (focusedProg != null) listOf(focusedProg) else currentChannelEpg
+                            }
+
                             TiviMateDetailsPanel(
                                 playerEngine = playerEngine,
                                 stream = focusedPreviewStream ?: currentPlayingStream,
-                                currentEpg = currentChannelEpg,
+                                currentEpg = effectiveEpgForDetails,
                                 activeCategoryTitle = activeCategoryTitle,
                                 nowEpochMillis = clockSnapshot.nowEpochMillis,
                                 modifier = Modifier.weight(1f).fillMaxHeight()
@@ -466,26 +630,64 @@ fun LiveTvDualCockpitScreen(
                             }
                         } else if (!isPosterGridSection) {
                             val channelColumnWidth = 285.dp
+                            val indicatorCoralRed = Color(0xFFFF3B5C)
+
                             Column(modifier = Modifier.fillMaxSize()) {
-                                TiviMateLiveEpgHeader(clockSnapshot = clockSnapshot, channelColumnWidth = channelColumnWidth)
+                                TiviMateLiveEpgHeader(clockSnapshot = clockSnapshot, channelColumnWidth = channelColumnWidth, timelineOffsetMinutes = timelineOffsetMinutes)
                                 Spacer(modifier = Modifier.height(4.dp))
-                                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                                    val timelineAreaWidth = (maxWidth - channelColumnWidth).coerceAtLeast(100.dp)
-                                    val playheadOffsetX = channelColumnWidth + (timelineAreaWidth * clockSnapshot.playheadFraction)
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .drawWithContent {
+                                            drawContent()
+                                            val frac = clockSnapshot.playheadFraction
+                                            if (frac in 0.0f..1.0f) {
+                                                val leftColPx = channelColumnWidth.toPx()
+                                                val timelineWidthPx = (size.width - leftColPx).coerceAtLeast(1f)
+                                                val needleX = leftColPx + (timelineWidthPx * frac)
+                                                drawLine(color = AetherColors.CyberCyan.copy(alpha = 0.28f), start = Offset(needleX, 0f), end = Offset(needleX, size.height), strokeWidth = 5.dp.toPx())
+                                                drawLine(color = indicatorCoralRed, start = Offset(needleX, 0f), end = Offset(needleX, size.height), strokeWidth = 1.8.dp.toPx())
+                                                drawCircle(color = indicatorCoralRed, radius = 4.dp.toPx(), center = Offset(needleX, 4.dp.toPx()))
+                                            }
+                                        }
+                                ) {
                                     LazyColumn(state = mediaListState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
                                         itemsIndexed(items = streamsInCategory, key = { _, stream -> stream.uniqueStreamKey }) { index, stream ->
                                             val isPlayingThis = currentPlayingStream?.uniqueStreamKey == stream.uniqueStreamKey
                                             val isPreviewingThis = (focusedPreviewStream?.uniqueStreamKey ?: currentPlayingStream?.uniqueStreamKey) == stream.uniqueStreamKey
                                             val entryMod = if (index == 0) Modifier.focusRequester(mediaListEntryFocusRequester) else Modifier
                                             val rowEpgList = if (isPreviewingThis || isPlayingThis) currentChannelEpg else emptyList()
+
+                                            val normalizedSlots = remember(stream.uniqueStreamKey, rowEpgList, clockSnapshot.windowStartEpochMillis, clockSnapshot.windowEndEpochMillis) {
+                                                AetherEpgMatrixCache.getOrBuildNormalizedSlots(stream, rowEpgList, clockSnapshot.windowStartEpochMillis, clockSnapshot.windowEndEpochMillis)
+                                            }
+
                                             Zone4MediaRowItem(
                                                 indexNumber = index + 1,
                                                 stream = stream,
                                                 isCurrentlyPlaying = isPlayingThis,
                                                 channelColumnWidth = channelColumnWidth,
-                                                rowEpgPrograms = rowEpgList,
+                                                normalizedSlots = normalizedSlots,
+                                                focusedTimeCursorMs = focusedTimeCursorMs,
+                                                timelineOffsetMinutes = timelineOffsetMinutes,
                                                 modifier = entryMod,
-                                                onFocused = { cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED; focusedPreviewStream = stream },
+                                                onFocusedChannelAndProgram = { activeProgramEntity ->
+                                                    cockpitStage = CockpitViewportStage.STAGE_3_CONTENT_MAXIMIZED
+                                                    focusedPreviewStream = stream
+                                                    focusedEpgPreviewProgram = activeProgramEntity
+                                                },
+                                                onMoveTimeCursor = { updatedCursorMs, updatedProgramEntity ->
+                                                    focusedTimeCursorMs = updatedCursorMs
+                                                    focusedEpgPreviewProgram = updatedProgramEntity
+                                                },
+                                                onShiftTimelineWindow = { deltaMinutes ->
+                                                    val nextOffset = (timelineOffsetMinutes + deltaMinutes).coerceIn(0, 360)
+                                                    if (nextOffset != timelineOffsetMinutes) {
+                                                        timelineOffsetMinutes = nextOffset
+                                                        focusedTimeCursorMs += (deltaMinutes.toLong() * 60_000L)
+                                                    }
+                                                },
                                                 onClickStream = {
                                                     if (isPlayingThis) isPureFullscreen = true
                                                     else { isPureFullscreen = false; onSelectStream(stream) }
@@ -495,10 +697,6 @@ fun LiveTvDualCockpitScreen(
                                                 onNavigateLeftToCategories = requestCategoryFocus
                                             )
                                         }
-                                    }
-                                    Box(modifier = Modifier.offset(x = playheadOffsetX - 3.dp, y = 0.dp).fillMaxHeight().width(7.dp)) {
-                                        Box(modifier = Modifier.align(Alignment.TopCenter).size(7.dp).clip(CircleShape).background(AetherColors.CyberCyan))
-                                        Box(modifier = Modifier.align(Alignment.TopCenter).fillMaxHeight().width(1.5.dp).background(AetherColors.CyberCyan.copy(alpha = 0.65f)))
                                     }
                                 }
                             }
@@ -552,21 +750,194 @@ fun LiveTvDualCockpitScreen(
         }
     }
 }
-
 @Composable
-private fun TiviMateLiveEpgHeader(clockSnapshot: EpgTimelineClockSnapshot, channelColumnWidth: Dp) {
+private fun TiviMateLiveEpgHeader(clockSnapshot: EpgTimelineClockSnapshot, channelColumnWidth: Dp, timelineOffsetMinutes: Int) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.width(channelColumnWidth), contentAlignment = Alignment.CenterStart) {
+        Row(modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.width(channelColumnWidth), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(clockSnapshot.dateTimeLabelDe, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                if (timelineOffsetMinutes > 0) {
+                    Box(modifier = Modifier.padding(end = 10.dp).clip(RoundedCornerShape(4.dp)).background(AetherColors.CyberCyan.copy(alpha = 0.2f)).padding(horizontal = 5.dp, vertical = 1.dp)) {
+                        Text("+${timelineOffsetMinutes}m", color = AetherColors.CyberCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 clockSnapshot.slotLabels.forEach { slotTime ->
-                    Text(slotTime, color = AetherColors.IceBlue.copy(alpha = 0.9f), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false, modifier = Modifier.weight(1f))
+                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.width(1.5.dp).height(10.dp).background(AetherColors.CyberCyan.copy(alpha = 0.45f)))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(slotTime, color = AetherColors.IceBlue.copy(alpha = 0.92f), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                    }
                 }
             }
         }
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(AetherColors.CyberCyan.copy(alpha = 0.30f)))
+    }
+}
+
+@Composable
+private fun Zone4MediaRowItem(
+    indexNumber: Int,
+    stream: StreamItemEntity,
+    isCurrentlyPlaying: Boolean,
+    channelColumnWidth: Dp,
+    normalizedSlots: List<NormalizedEpgTimelineSlot>,
+    focusedTimeCursorMs: Long,
+    timelineOffsetMinutes: Int,
+    modifier: Modifier = Modifier,
+    onFocusedChannelAndProgram: (EpgProgramEntity?) -> Unit,
+    onMoveTimeCursor: (Long, EpgProgramEntity?) -> Unit,
+    onShiftTimelineWindow: (Int) -> Unit,
+    onClickStream: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onOpenFolderModal: () -> Unit,
+    onNavigateLeftToCategories: () -> Unit
+) {
+    var isRowFocused by remember { mutableStateOf(false) }
+    val channelLogoBitmap = rememberAetherAsyncBitmap(imageUrl = stream.logoUrl, debounceMs = 100L)
+
+    val activeSlotIndex = remember(normalizedSlots, focusedTimeCursorMs) {
+        if (normalizedSlots.isEmpty()) 0
+        else {
+            val idx = normalizedSlots.indexOfFirst { slot -> focusedTimeCursorMs >= slot.visibleStartMillis && focusedTimeCursorMs < slot.visibleEndMillis }
+            when {
+                idx >= 0 -> idx
+                focusedTimeCursorMs < normalizedSlots.first().visibleStartMillis -> 0
+                else -> normalizedSlots.lastIndex
+            }
+        }
+    }
+
+    LaunchedEffect(isRowFocused, activeSlotIndex, normalizedSlots) {
+        if (isRowFocused) {
+            val activeSlot = normalizedSlots.getOrNull(activeSlotIndex)
+            onFocusedChannelAndProgram(activeSlot?.toEpgProgramEntity(stream.epgChannelId ?: stream.uniqueStreamKey))
+        }
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(42.dp)
+            .onFocusChanged { state ->
+                isRowFocused = state.isFocused
+                if (state.isFocused) {
+                    val activeSlot = normalizedSlots.getOrNull(activeSlotIndex)
+                    onFocusedChannelAndProgram(activeSlot?.toEpgProgramEntity(stream.epgChannelId ?: stream.uniqueStreamKey))
+                }
+            }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.DirectionRight -> {
+                            if (activeSlotIndex < normalizedSlots.lastIndex) {
+                                val nextSlot = normalizedSlots[activeSlotIndex + 1]
+                                val targetMidpointMs = nextSlot.visibleStartMillis + ((nextSlot.visibleEndMillis - nextSlot.visibleStartMillis) / 2L)
+                                onMoveTimeCursor(targetMidpointMs, nextSlot.toEpgProgramEntity(stream.epgChannelId ?: stream.uniqueStreamKey))
+                            } else {
+                                onShiftTimelineWindow(30)
+                            }
+                            true
+                        }
+                        Key.DirectionLeft -> {
+                            if (activeSlotIndex > 0) {
+                                val prevSlot = normalizedSlots[activeSlotIndex - 1]
+                                val targetMidpointMs = prevSlot.visibleStartMillis + ((prevSlot.visibleEndMillis - prevSlot.visibleStartMillis) / 2L)
+                                onMoveTimeCursor(targetMidpointMs, prevSlot.toEpgProgramEntity(stream.epgChannelId ?: stream.uniqueStreamKey))
+                            } else if (timelineOffsetMinutes > 0) {
+                                onShiftTimelineWindow(-30)
+                            } else {
+                                onNavigateLeftToCategories()
+                            }
+                            true
+                        }
+                        Key.DirectionCenter, Key.Enter -> { onClickStream(); true }
+                        Key.Menu, Key.Bookmark -> { onOpenFolderModal(); true }
+                        else -> false
+                    }
+                } else false
+            }
+            .focusable()
+            .clickable { onClickStream() },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            modifier = Modifier
+                .width(channelColumnWidth)
+                .fillMaxHeight()
+                .padding(end = 6.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(when { isRowFocused -> AetherColors.DeepSpaceNavy.copy(alpha = 0.96f); isCurrentlyPlaying -> AetherColors.NeonEmerald.copy(alpha = 0.14f); else -> Color.Transparent })
+                .border(if (isRowFocused) 1.dp else 0.dp, if (isRowFocused) AetherColors.CyberCyan.copy(alpha = 0.55f) else Color.Transparent, RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("$indexNumber", color = if (isRowFocused) Color.White else AetherColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false, modifier = Modifier.width(32.dp))
+            Box(
+                modifier = Modifier.width(44.dp).height(26.dp).clip(RoundedCornerShape(4.dp)).background(Color.White.copy(alpha = if (channelLogoBitmap != null) 0.92f else 0.08f)).border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.30f), RoundedCornerShape(4.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (channelLogoBitmap != null) Image(bitmap = channelLogoBitmap, contentDescription = stream.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp))
+                else Text("TV", color = AetherColors.CyberCyan, fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            if (isCurrentlyPlaying) Text("▶", color = AetherColors.NeonEmerald, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(end = 5.dp))
+            Text(stream.name, color = when { isRowFocused -> AetherColors.CyberCyan; isCurrentlyPlaying -> AetherColors.NeonEmerald; else -> Color.White }, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Box(modifier = Modifier.clip(CircleShape).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onToggleFavorite() }.padding(horizontal = 4.dp, vertical = 2.dp)) {
+                Text(if (stream.isQuickFavorite) "★" else "☆", color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary.copy(alpha = 0.6f), fontSize = 13.sp, maxLines = 1, softWrap = false)
+            }
+        }
+
+        Row(modifier = Modifier.weight(1f).fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
+            normalizedSlots.forEachIndexed { slotIdx, slot ->
+                val isSlotFocused = isRowFocused && (slotIdx == activeSlotIndex)
+                val isLiveSlotOfPlayingChannel = isCurrentlyPlaying && (slotIdx == 0) && (timelineOffsetMinutes == 0)
+
+                Box(
+                    modifier = Modifier
+                        .weight(slot.weightFraction.coerceAtLeast(0.05f))
+                        .fillMaxHeight()
+                        .padding(end = 3.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            when {
+                                isSlotFocused -> Color.White
+                                isLiveSlotOfPlayingChannel -> AetherColors.CyberCyan.copy(alpha = 0.22f)
+                                isRowFocused -> AetherColors.CyberCyan.copy(alpha = 0.14f)
+                                else -> AetherColors.ObsidianBlack.copy(alpha = 0.52f)
+                            }
+                        )
+                        .border(
+                            width = if (isSlotFocused) 1.5.dp else 1.dp,
+                            color = when {
+                                isSlotFocused -> AetherColors.CyberCyan
+                                isLiveSlotOfPlayingChannel -> AetherColors.CyberCyan.copy(alpha = 0.55f)
+                                isRowFocused -> AetherColors.CyberCyan.copy(alpha = 0.35f)
+                                else -> AetherColors.CyberCyan.copy(alpha = 0.14f)
+                            },
+                            shape = RoundedCornerShape(6.dp)
+                        )
+                        .clickable {
+                            val targetMidpointMs = slot.visibleStartMillis + ((slot.visibleEndMillis - slot.visibleStartMillis) / 2L)
+                            onMoveTimeCursor(targetMidpointMs, slot.toEpgProgramEntity(stream.epgChannelId ?: stream.uniqueStreamKey))
+                            onClickStream()
+                        }
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Text(
+                        text = slot.title,
+                        color = when { isSlotFocused -> AetherColors.ObsidianBlack; slot.hasRealProgramInfo -> Color.White; else -> AetherColors.TextSecondary.copy(alpha = 0.78f) },
+                        fontSize = 12.sp,
+                        fontWeight = when { isSlotFocused -> FontWeight.Bold; slot.hasRealProgramInfo -> FontWeight.SemiBold; else -> FontWeight.Normal },
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -925,7 +1296,7 @@ fun TiviMateDetailsPanel(playerEngine: AetherVideoPlayerEngine, stream: StreamIt
             }
         } else {
             val epgNow = currentEpg.firstOrNull()
-            val primaryHeaderTitle = if (!epgNow?.title.isNullOrBlank()) epgNow!!.title else stream.name
+            val primaryHeaderTitle = if (!epgNow?.title.isNullOrBlank() && epgNow?.title != "Keine Programminformationen") epgNow!!.title else stream.name
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -945,11 +1316,14 @@ fun TiviMateDetailsPanel(playerEngine: AetherVideoPlayerEngine, stream: StreamIt
                         val endStr = formatEpochToClockTime(epgNow.endEpochMillis)
                         val totalDur = (epgNow.endEpochMillis - epgNow.startEpochMillis).coerceAtLeast(1L)
                         val effectiveNow = if (nowEpochMillis > 0L) nowEpochMillis else Clock.System.now().toEpochMilliseconds()
-                        val epgProg = ((effectiveNow - epgNow.startEpochMillis).toFloat() / totalDur.toFloat()).coerceIn(0.05f, 1f)
-                        val remainMin = ((epgNow.endEpochMillis - effectiveNow) / 60_000L).coerceAtLeast(1L)
+                        val isCurrentlyAiring = effectiveNow in epgNow.startEpochMillis..epgNow.endEpochMillis
+                        val epgProg = if (isCurrentlyAiring) ((effectiveNow - epgNow.startEpochMillis).toFloat() / totalDur.toFloat()).coerceIn(0.05f, 1f) else if (effectiveNow > epgNow.endEpochMillis) 1f else 0f
+                        val remainOrTotalMin = if (isCurrentlyAiring) "Noch ${((epgNow.endEpochMillis - effectiveNow) / 60_000L).coerceAtLeast(1L)} Min" else "${(totalDur / 60_000L).coerceAtLeast(1L)} Min"
                         Text("$startStr – $endStr", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
-                        LinearProgressIndicator(progress = { epgProg }, modifier = Modifier.width(54.dp).height(4.dp).clip(RoundedCornerShape(2.dp)), color = AetherColors.CyberCyan, trackColor = AetherColors.DeepSpaceNavy)
-                        Text("$remainMin Min", color = AetherColors.IceBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                        if (isCurrentlyAiring) {
+                            LinearProgressIndicator(progress = { epgProg }, modifier = Modifier.width(54.dp).height(4.dp).clip(RoundedCornerShape(2.dp)), color = AetherColors.CyberCyan, trackColor = AetherColors.DeepSpaceNavy)
+                        }
+                        Text(remainOrTotalMin, color = AetherColors.IceBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
                     DetailBadge(stream.name, AetherColors.CyberCyan.copy(alpha = 0.35f), AetherColors.CyberCyan)
                     if (techMeta.resolutionLabel.isNotBlank()) DetailBadge(techMeta.resolutionLabel, AetherColors.IceBlue.copy(alpha = 0.4f), AetherColors.IceBlue)
@@ -963,7 +1337,7 @@ fun TiviMateDetailsPanel(playerEngine: AetherVideoPlayerEngine, stream: StreamIt
                 }
                 Text(descriptionText, color = AetherColors.TextSecondary, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
-            Text("Drücke [OK] für Wiedergabe / Vollbild • [MENÜ] Favoriten-Ordner • [LINKS/ZURÜCK] Kategorien", color = AetherColors.CyberCyan.copy(alpha = 0.85f), fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+            Text("Drücke [LINKS/RECHTS] für Zeitachse • [OK] Wiedergabe/Vollbild • [MENÜ] Favoriten", color = AetherColors.CyberCyan.copy(alpha = 0.85f), fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
         }
     }
 }
@@ -974,103 +1348,6 @@ private fun DetailBadge(text: String, borderColor: Color, textColor: Color) {
         Text(text, color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
     }
 }
-
-@Composable
-private fun Zone4MediaRowItem(
-    indexNumber: Int,
-    stream: StreamItemEntity,
-    isCurrentlyPlaying: Boolean,
-    channelColumnWidth: Dp,
-    rowEpgPrograms: List<EpgProgramEntity>,
-    modifier: Modifier = Modifier,
-    onFocused: () -> Unit,
-    onClickStream: () -> Unit,
-    onToggleFavorite: () -> Unit,
-    onOpenFolderModal: () -> Unit,
-    onNavigateLeftToCategories: () -> Unit
-) {
-    var isFocused by remember { mutableStateOf(false) }
-    val channelLogoBitmap = rememberAetherAsyncBitmap(imageUrl = stream.logoUrl, debounceMs = 100L)
-    val nowProgramTitle = remember(rowEpgPrograms, stream.plotDescription) {
-        rowEpgPrograms.firstOrNull()?.title?.takeIf { it.isNotBlank() } ?: stream.plotDescription?.takeIf { it.isNotBlank() } ?: "Keine Information"
-    }
-    val nextProgramTitle = remember(rowEpgPrograms) { rowEpgPrograms.getOrNull(1)?.title?.takeIf { it.isNotBlank() } ?: "Keine Information" }
-    val hasRealNowInfo = nowProgramTitle != "Keine Information"
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(42.dp)
-            .onFocusChanged { state -> isFocused = state.isFocused; if (state.isFocused) onFocused() }
-            .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown) {
-                    when (event.key) {
-                        Key.DirectionLeft -> { onNavigateLeftToCategories(); true }
-                        Key.DirectionCenter, Key.Enter -> { onClickStream(); true }
-                        Key.Menu, Key.Bookmark -> { onOpenFolderModal(); true }
-                        else -> false
-                    }
-                } else false
-            }
-            .focusable()
-            .clickable { onClickStream() },
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(
-            modifier = Modifier
-                .width(channelColumnWidth)
-                .fillMaxHeight()
-                .padding(end = 8.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(when { isFocused -> AetherColors.DeepSpaceNavy.copy(alpha = 0.95f); isCurrentlyPlaying -> AetherColors.NeonEmerald.copy(alpha = 0.14f); else -> Color.Transparent })
-                .padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("$indexNumber", color = if (isFocused) Color.White else AetherColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false, modifier = Modifier.width(32.dp))
-            Box(
-                modifier = Modifier.width(44.dp).height(26.dp).clip(RoundedCornerShape(4.dp)).background(Color.White.copy(alpha = if (channelLogoBitmap != null) 0.92f else 0.08f)).border(1.dp, AetherColors.CyberCyan.copy(alpha = 0.30f), RoundedCornerShape(4.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                if (channelLogoBitmap != null) Image(bitmap = channelLogoBitmap, contentDescription = stream.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp))
-                else Text("TV", color = AetherColors.CyberCyan, fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            if (isCurrentlyPlaying) Text("▶", color = AetherColors.NeonEmerald, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(end = 5.dp))
-            Text(stream.name, color = when { isFocused -> AetherColors.CyberCyan; isCurrentlyPlaying -> AetherColors.NeonEmerald; else -> Color.White }, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Box(modifier = Modifier.clip(CircleShape).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onToggleFavorite() }.padding(horizontal = 4.dp, vertical = 2.dp)) {
-                Text(if (stream.isQuickFavorite) "★" else "☆", color = if (stream.isQuickFavorite) AetherColors.LaserAmber else AetherColors.TextSecondary.copy(alpha = 0.6f), fontSize = 13.sp, maxLines = 1, softWrap = false)
-            }
-        }
-
-        Row(modifier = Modifier.weight(1f).fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .weight(0.56f)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(when { isFocused -> Color.White; isCurrentlyPlaying -> AetherColors.CyberCyan.copy(alpha = 0.22f); else -> AetherColors.ObsidianBlack.copy(alpha = 0.55f) })
-                    .border(if (isFocused) 1.5.dp else 1.dp, when { isFocused -> AetherColors.CyberCyan; isCurrentlyPlaying -> AetherColors.CyberCyan.copy(alpha = 0.55f); else -> AetherColors.CyberCyan.copy(alpha = 0.16f) }, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                Text(nowProgramTitle, color = when { isFocused -> AetherColors.ObsidianBlack; hasRealNowInfo -> Color.White; else -> AetherColors.TextSecondary.copy(alpha = 0.8f) }, fontSize = 13.sp, fontWeight = if (isFocused || hasRealNowInfo) FontWeight.Bold else FontWeight.Normal, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-            Box(
-                modifier = Modifier
-                    .weight(0.44f)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.18f) else AetherColors.ObsidianBlack.copy(alpha = 0.42f))
-                    .border(1.dp, if (isFocused) AetherColors.CyberCyan.copy(alpha = 0.45f) else AetherColors.CyberCyan.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                Text(nextProgramTitle, color = if (isFocused) Color.White else AetherColors.TextSecondary.copy(alpha = 0.75f), fontSize = 12.sp, fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
-}
-
 private data class QuickHudActionItem(val icon: String, val label: String, val onActivate: () -> Unit)
 
 @Composable
@@ -1080,6 +1357,7 @@ fun FullscreenPlayerHudOverlay(
     isCinemaMode: Boolean,
     currentPreset: StreamBufferPreset,
     onCyclePreset: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     onZapChannelOffset: (Int) -> Unit,
     onExitFullscreen: () -> Unit
 ) {
@@ -1153,7 +1431,7 @@ fun FullscreenPlayerHudOverlay(
             },
             QuickHudActionItem("⛶", aspectModes[aspectModeIdx]) { aspectModeIdx = (aspectModeIdx + 1) % aspectModes.size },
             QuickHudActionItem("⏲", sleepModes[sleepTimerIdx]) { sleepTimerIdx = (sleepTimerIdx + 1) % sleepModes.size },
-            QuickHudActionItem("⚙️", "Einstellungen") { onCyclePreset() }
+            QuickHudActionItem("⚙️", "Einstellungen") { onOpenSettings() }
         )
     }
 
@@ -1383,7 +1661,12 @@ private fun HudTransportCircleButton(symbol: String, isSelected: Boolean, isLarg
     val bgColor = when { isSelected -> Color.White; isLargeCenter -> Color.White.copy(alpha = 0.85f); else -> Color.Transparent }
     val textColor = if (isSelected || isLargeCenter) AetherColors.ObsidianBlack else Color.White
     Box(
-        modifier = Modifier.size(sizeDp).clip(CircleShape).background(bgColor).border(if (isSelected) 2.dp else 0.dp, if (isSelected) AetherColors.CyberCyan else Color.Transparent, CircleShape).clickable { onClick() },
+        modifier = Modifier
+            .size(sizeDp)
+            .clip(CircleShape)
+            .background(bgColor)
+            .border(if (isSelected) 2.dp else 0.dp, if (isSelected) AetherColors.CyberCyan else Color.Transparent, CircleShape)
+            .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Text(symbol, color = textColor, fontSize = if (isLargeCenter) 18.sp else 15.sp, fontWeight = FontWeight.Black, maxLines = 1, softWrap = false)
