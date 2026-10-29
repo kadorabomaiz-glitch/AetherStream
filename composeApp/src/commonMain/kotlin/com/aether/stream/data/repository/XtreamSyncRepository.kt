@@ -3,6 +3,7 @@ package com.aether.stream.data.repository
 import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
 import com.aether.stream.data.local.CategoryEntity
+import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.PlaylistEntity
 import com.aether.stream.data.local.SeriesEpisodeEntity
 import com.aether.stream.data.local.StreamItemEntity
@@ -11,8 +12,11 @@ import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
 import kotlinx.serialization.SerialName
@@ -25,6 +29,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 
 @Serializable
 data class XtreamCategoryDto(
@@ -77,12 +82,27 @@ data class XtreamEpisodeDto(
     @SerialName("info") val info: JsonElement? = null
 )
 
+@Serializable
+data class XtreamEpgListingDto(
+    @SerialName("id") val id: JsonElement? = null,
+    @SerialName("epg_id") val epgId: JsonElement? = null,
+    @SerialName("title") val title: String? = null,
+    @SerialName("description") val description: String? = null,
+    @SerialName("start_timestamp") val startTimestamp: JsonElement? = null,
+    @SerialName("stop_timestamp") val stopTimestamp: JsonElement? = null
+)
+
 private fun JsonElement?.asCleanString(default: String = ""): String =
     (this as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() } ?: default
 
 private fun JsonElement?.asCleanInt(default: Int = 0): Int =
     (this as? JsonPrimitive)?.intOrNull
         ?: (this as? JsonPrimitive)?.contentOrNull?.trim()?.toIntOrNull()
+        ?: default
+
+private fun JsonElement?.asCleanLong(default: Long = 0L): Long =
+    (this as? JsonPrimitive)?.longOrNull
+        ?: (this as? JsonPrimitive)?.contentOrNull?.trim()?.toLongOrNull()
         ?: default
 
 class XtreamSyncRepository(
@@ -107,15 +127,20 @@ class XtreamSyncRepository(
             if (!it.startsWith("http://") && !it.startsWith("https://")) "http://$it" else it
         }.trimEnd('/')
 
-    /**
-     * L10 Zero-Stutter Startup:
-     * Überspringt den schweren Netzwerk-Sync, wenn Kategorien bereits in SQLite liegen.
-     */
+    @OptIn(ExperimentalEncodingApi::class)
+    private fun decodeBase64OrPlain(raw: String?): String {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return ""
+        return runCatching {
+            val decoded = Base64.Default.decode(trimmed).decodeToString().trim()
+            if (decoded.isNotEmpty() && decoded.none { it.code < 9 || (it.code in 14..31) }) decoded else trimmed
+        }.getOrDefault(trimmed)
+    }
+
     suspend fun triggerDailySilentSyncIfNeeded(): Int = withContext(Dispatchers.IO) {
         runCatching {
             val activePlaylist = dao.getActivePlaylistOnce() ?: return@withContext 0
             val existingCatKeys = dao.getExistingCategoryKeys(activePlaylist.id)
-
             if (existingCatKeys.isNotEmpty()) {
                 return@withContext 0
             }
@@ -134,7 +159,6 @@ class XtreamSyncRepository(
 
         val knownCategoryKeys = mutableSetOf<String>()
         var newlyDiscoveredCount = 0
-        var totalStreamsSaved = 0
 
         fun buildCategoryEntity(
             catId: String,
@@ -154,7 +178,7 @@ class XtreamSyncRepository(
                         providerCategoryId = catId,
                         categoryName = catName,
                         sectionType = section,
-                        isVisible = true, // L10 GARANTIE: Immer sichtbar, auch Adult/Neue Gruppen!
+                        isVisible = true,
                         isLocked = false,
                         isNewlyDiscovered = isBrandNewGroup,
                         customSortOrder = sortIndex
@@ -164,44 +188,24 @@ class XtreamSyncRepository(
             return key
         }
 
-        // 1. KATEGORIEN LADEN (Live, VOD & Serien)
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
-            buildCategoryEntity(
-                catId = dto.categoryId.asCleanString("0"),
-                catName = dto.categoryName?.takeIf { it.isNotBlank() } ?: "Live TV",
-                section = AetherSectionType.LIVE,
-                sortIndex = idx,
-                targetList = liveCategories
-            )
+            buildCategoryEntity(dto.categoryId.asCleanString("0"), dto.categoryName?.takeIf { it.isNotBlank() } ?: "Live TV", AetherSectionType.LIVE, idx, liveCategories)
         }
         if (liveCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(liveCategories)
 
         val vodCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_vod_categories").forEachIndexed { idx, dto ->
-            buildCategoryEntity(
-                catId = dto.categoryId.asCleanString("0"),
-                catName = dto.categoryName?.takeIf { it.isNotBlank() } ?: "Filme",
-                section = AetherSectionType.VOD,
-                sortIndex = idx,
-                targetList = vodCategories
-            )
+            buildCategoryEntity(dto.categoryId.asCleanString("0"), dto.categoryName?.takeIf { it.isNotBlank() } ?: "Filme", AetherSectionType.VOD, idx, vodCategories)
         }
         if (vodCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(vodCategories)
 
         val seriesCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_series_categories").forEachIndexed { idx, dto ->
-            buildCategoryEntity(
-                catId = dto.categoryId.asCleanString("0"),
-                catName = dto.categoryName?.takeIf { it.isNotBlank() } ?: "Serien",
-                section = AetherSectionType.SERIES,
-                sortIndex = idx,
-                targetList = seriesCategories
-            )
+            buildCategoryEntity(dto.categoryId.asCleanString("0"), dto.categoryName?.takeIf { it.isNotBlank() } ?: "Serien", AetherSectionType.SERIES, idx, seriesCategories)
         }
         if (seriesCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(seriesCategories)
 
-        // 2. LIVE-TV STREAMS LADEN
         val liveStreams = mutableListOf<StreamItemEntity>()
         val extraLiveCats = mutableListOf<CategoryEntity>()
         fetchLiveStreams(apiEndpoint, playlist).forEachIndexed { idx, dto ->
@@ -209,17 +213,7 @@ class XtreamSyncRepository(
             if (sId != 0) {
                 val rawCatId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
                 val targetCatKey = "${playlist.id}_${AetherSectionType.LIVE.name}_$rawCatId"
-                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) {
-                    targetCatKey
-                } else {
-                    buildCategoryEntity(
-                        catId = rawCatId,
-                        catName = "⚡ Spezial-Feeds ($rawCatId)",
-                        section = AetherSectionType.LIVE,
-                        sortIndex = 9999,
-                        targetList = extraLiveCats
-                    )
-                }
+                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) targetCatKey else buildCategoryEntity(rawCatId, "⚡ Spezial-Feeds ($rawCatId)", AetherSectionType.LIVE, 9999, extraLiveCats)
 
                 liveStreams.add(
                     StreamItemEntity(
@@ -231,7 +225,7 @@ class XtreamSyncRepository(
                         name = dto.name?.takeIf { it.isNotBlank() } ?: "Kanal #$sId",
                         logoUrl = dto.streamIcon,
                         streamUrl = "$cleanServer/live/${playlist.username}/${playlist.password}/$sId.ts",
-                        epgChannelId = dto.epgChannelId,
+                        epgChannelId = dto.epgChannelId?.takeIf { it.isNotBlank() } ?: "${playlist.id}_LIVE_$sId",
                         containerExtension = "ts",
                         isVisible = true,
                         customChannelNumber = dto.num.asCleanInt(idx + 1)
@@ -241,11 +235,9 @@ class XtreamSyncRepository(
         }
         if (extraLiveCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraLiveCats)
         if (liveStreams.isNotEmpty()) {
-            liveStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += liveStreams.size
+            liveStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it); yield() }
         }
 
-        // 3. SERIEN LADEN
         val seriesStreams = mutableListOf<StreamItemEntity>()
         val extraSeriesCats = mutableListOf<CategoryEntity>()
         fetchSeries(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
@@ -253,17 +245,8 @@ class XtreamSyncRepository(
             if (sId != 0) {
                 val rawCatId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
                 val targetCatKey = "${playlist.id}_${AetherSectionType.SERIES.name}_$rawCatId"
-                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) {
-                    targetCatKey
-                } else {
-                    buildCategoryEntity(
-                        catId = rawCatId,
-                        catName = "⚡ Serien ($rawCatId)",
-                        section = AetherSectionType.SERIES,
-                        sortIndex = 9999,
-                        targetList = extraSeriesCats
-                    )
-                }
+                val finalCatKey = if (knownCategoryKeys.contains(targetCatKey)) targetCatKey else buildCategoryEntity(rawCatId, "⚡ Serien ($rawCatId)", AetherSectionType.SERIES, 9999, extraSeriesCats)
+
                 seriesStreams.add(
                     StreamItemEntity(
                         uniqueStreamKey = "${playlist.id}_SERIES_$sId",
@@ -284,21 +267,85 @@ class XtreamSyncRepository(
         }
         if (extraSeriesCats.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(extraSeriesCats)
         if (seriesStreams.isNotEmpty()) {
-            seriesStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it) }
-            totalStreamsSaved += seriesStreams.size
+            seriesStreams.chunked(2500).forEach { dao.insertNewStreamsIgnoringExisting(it); yield() }
         }
 
-        dao.markPlaylistSynced(
-            playlistId = playlist.id,
-            timestamp = Clock.System.now().toEpochMilliseconds()
-        )
-
+        dao.markPlaylistSynced(playlist.id, Clock.System.now().toEpochMilliseconds())
         newlyDiscoveredCount
     }
 
     /**
-     * ON-DEMAND TURBO: Lädt VOD-Filme pro Kategorie nach (unterstützt Arrays UND PHP-Objekte)!
+     * PHASE 3 EPG: Lädt die aktuellen Xtream Short-EPG Programmdaten (Base64-dekodiert) für einen Kanal
+     * und schreibt sie in 2.000er-Transaktions-Batches in die SQLite-Tabelle epg_programs.
      */
+    suspend fun fetchAndStoreShortEpgForStream(
+        playlist: PlaylistEntity,
+        stream: StreamItemEntity,
+        storeDescriptions: Boolean = true
+    ): List<EpgProgramEntity> = withContext(Dispatchers.IO) {
+        if (stream.providerStreamId <= 0) return@withContext emptyList()
+        val cleanServer = normalizeServerUrl(playlist.serverUrl)
+        val apiEndpoint = "$cleanServer/player_api.php"
+        val channelKey = stream.epgChannelId?.takeIf { it.isNotBlank() } ?: stream.uniqueStreamKey
+
+        val parsedPrograms = runCatching {
+            val raw = httpClient.get(apiEndpoint) {
+                header("User-Agent", IPTV_USER_AGENT)
+                parameter("username", playlist.username)
+                parameter("password", playlist.password)
+                parameter("action", "get_short_epg")
+                parameter("stream_id", stream.providerStreamId)
+                parameter("limit", 16)
+            }.body<String>().trim()
+
+            if (!raw.startsWith("{")) return@runCatching emptyList()
+            val rootObj = jsonParser.parseToJsonElement(raw) as? JsonObject ?: return@runCatching emptyList()
+            val listings = rootObj["epg_listings"] as? JsonArray ?: return@runCatching emptyList()
+
+            listings.mapNotNull { elem ->
+                val obj = elem as? JsonObject ?: return@mapNotNull null
+                val dto = runCatching { jsonParser.decodeFromJsonElement<XtreamEpgListingDto>(obj) }.getOrNull() ?: return@mapNotNull null
+                val startSec = dto.startTimestamp.asCleanLong(0L)
+                val stopSec = dto.stopTimestamp.asCleanLong(0L)
+                if (startSec <= 0L || stopSec <= startSec) return@mapNotNull null
+
+                val decodedTitle = decodeBase64OrPlain(dto.title).ifBlank { "Live Programm" }
+                val decodedDesc = if (storeDescriptions) decodeBase64OrPlain(dto.description).takeIf { it.isNotBlank() } else null
+
+                EpgProgramEntity(
+                    epgChannelId = channelKey,
+                    title = decodedTitle,
+                    description = decodedDesc,
+                    startEpochMillis = startSec * 1000L,
+                    endEpochMillis = stopSec * 1000L
+                )
+            }
+        }.getOrDefault(emptyList())
+
+        if (parsedPrograms.isNotEmpty()) {
+            dao.deleteEpgForChannel(channelKey)
+            dao.insertEpgProgramsInBatches(parsedPrograms)
+        }
+        parsedPrograms
+    }
+
+    /**
+     * Bereinigt abgelaufene EPG-Einträge gemäß der eingestellten Aufbewahrungsdauer (Bild 5)
+     * und gibt die Anzahl der aktuell gespeicherten EPG-Kanäle zurück (Bild 6).
+     */
+    suspend fun pruneExpiredEpgAndGetChannelCount(pastDaysToKeep: Int = 7): Int = withContext(Dispatchers.IO) {
+        runCatching {
+            val safeDays = pastDaysToKeep.coerceIn(1, 30).toLong()
+            val cutoffMs = Clock.System.now().toEpochMilliseconds() - (safeDays * 86_400_000L)
+            dao.deleteExpiredEpgProgramsBefore(cutoffMs)
+            dao.getDistinctEpgChannelsCount()
+        }.getOrDefault(0)
+    }
+
+    suspend fun clearAllEpgCache() = withContext(Dispatchers.IO) {
+        runCatching { dao.clearAllEpgPrograms() }
+    }
+
     suspend fun fetchVodStreamsForCategory(
         playlist: PlaylistEntity,
         category: CategoryEntity
@@ -314,11 +361,7 @@ class XtreamSyncRepository(
             else {
                 val ext = dto.containerExtension.asCleanString("mp4").trimStart('.').ifBlank { "mp4" }
                 val directUrl = dto.directSource.asCleanString("")
-                val finalVodUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
-                    directUrl
-                } else {
-                    "$cleanServer/movie/${playlist.username}/${playlist.password}/$sId.$ext"
-                }
+                val finalVodUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) directUrl else "$cleanServer/movie/${playlist.username}/${playlist.password}/$sId.$ext"
                 StreamItemEntity(
                     uniqueStreamKey = "${playlist.id}_VOD_$sId",
                     playlistId = playlist.id,
@@ -396,7 +439,6 @@ class XtreamSyncRepository(
                 parameter("action", "get_series_info")
                 parameter("series_id", seriesId)
             }.body<String>().trim()
-
             if (!rawText.startsWith("{") && !rawText.startsWith("[")) return@runCatching null
             jsonParser.parseToJsonElement(rawText)
         }.getOrNull() ?: return@withContext false
@@ -412,22 +454,14 @@ class XtreamSyncRepository(
             val infoObj = epDto.info as? JsonObject
             val seasonNum = epDto.season.asCleanInt(fallbackSeason).coerceAtLeast(1)
             val epNum = epDto.episodeNum.asCleanInt(fallbackEpIndex).coerceAtLeast(1)
-
-            val extCandidate = epDto.containerExtension.asCleanString("")
-                .ifEmpty { infoObj?.get("container_extension").asCleanString("mp4") }
+            val extCandidate = epDto.containerExtension.asCleanString("").ifEmpty { infoObj?.get("container_extension").asCleanString("mp4") }
             val ext = extCandidate.trimStart('.').ifBlank { "mp4" }
-
             val plot = infoObj?.get("plot").asCleanString("").takeIf { it.isNotEmpty() }
             val durationSeconds = infoObj?.get("duration_secs").asCleanInt(0).toLong()
             val rating = infoObj?.get("rating").asCleanString("")
 
             val directUrl = epDto.directSource.asCleanString("")
-            val videoUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) {
-                directUrl
-            } else {
-                val cleanEpisodeId = rawId.substringBeforeLast(".")
-                "$cleanServer/series/${playlist.username}/${playlist.password}/$cleanEpisodeId.$ext"
-            }
+            val videoUrl = if (directUrl.startsWith("http://") || directUrl.startsWith("https://")) directUrl else "$cleanServer/series/${playlist.username}/${playlist.password}/${rawId.substringBeforeLast(".")}.$ext"
 
             episodeEntities.add(
                 SeriesEpisodeEntity(
@@ -445,217 +479,110 @@ class XtreamSyncRepository(
             )
         }
 
-        fun scanJsonRecursively(
-            element: JsonElement,
-            currentSeason: Int,
-            fallbackEpIndex: Int,
-            depth: Int
-        ) {
+        fun scanJsonRecursively(element: JsonElement, currentSeason: Int, fallbackEpIndex: Int, depth: Int) {
             if (depth > MAX_RECURSION_DEPTH) return
-
             when (element) {
                 is JsonObject -> {
                     val hasEpisodeId = element.containsKey("id") || element.containsKey("stream_id")
-                    val hasEpisodeFields = element.containsKey("episode_num") ||
-                        element.containsKey("container_extension") ||
-                        element.containsKey("title") ||
-                        element.containsKey("info")
-
+                    val hasEpisodeFields = element.containsKey("episode_num") || element.containsKey("container_extension") || element.containsKey("title") || element.containsKey("info")
                     if (hasEpisodeId && hasEpisodeFields) {
-                        runCatching {
-                            val dto = jsonParser.decodeFromJsonElement<XtreamEpisodeDto>(element)
-                            parseEpisodeDtoAndAdd(dto, currentSeason, fallbackEpIndex)
-                        }
+                        runCatching { parseEpisodeDtoAndAdd(jsonParser.decodeFromJsonElement(element), currentSeason, fallbackEpIndex) }
                     } else {
                         var runningIdx = 1
                         element.forEach { (key, child) ->
                             val parsedKeyNum = key.trim().toIntOrNull()?.coerceAtLeast(1)
-                            val childIsDirectEpisode = (child is JsonObject) &&
-                                (child.containsKey("id") || child.containsKey("stream_id"))
-
-                            if (childIsDirectEpisode) {
-                                scanJsonRecursively(child, currentSeason, parsedKeyNum ?: runningIdx, depth + 1)
-                            } else {
-                                scanJsonRecursively(child, parsedKeyNum ?: currentSeason, runningIdx, depth + 1)
-                            }
+                            val childIsDirectEpisode = (child is JsonObject) && (child.containsKey("id") || child.containsKey("stream_id"))
+                            if (childIsDirectEpisode) scanJsonRecursively(child, currentSeason, parsedKeyNum ?: runningIdx, depth + 1)
+                            else scanJsonRecursively(child, parsedKeyNum ?: currentSeason, runningIdx, depth + 1)
                             runningIdx++
                         }
                     }
                 }
-                is JsonArray -> {
-                    element.forEachIndexed { index, item ->
-                        if (item is JsonArray) {
-                            scanJsonRecursively(item, index + 1, 1, depth + 1)
-                        } else {
-                            scanJsonRecursively(item, currentSeason, index + 1, depth + 1)
-                        }
-                    }
+                is JsonArray -> element.forEachIndexed { index, item ->
+                    if (item is JsonArray) scanJsonRecursively(item, index + 1, 1, depth + 1)
+                    else scanJsonRecursively(item, currentSeason, index + 1, depth + 1)
                 }
                 else -> Unit
             }
         }
 
         scanJsonRecursively(episodesElement, currentSeason = 1, fallbackEpIndex = 1, depth = 0)
-
         if (episodeEntities.isNotEmpty()) {
             dao.insertOrUpdateEpisodes(episodeEntities)
             return@withContext true
         }
-
         return@withContext false
     }
 
-    private suspend fun fetchCategories(
-        endpoint: String,
-        playlist: PlaylistEntity,
-        action: String
-    ): List<XtreamCategoryDto> = runCatching {
+    private suspend fun fetchCategories(endpoint: String, playlist: PlaylistEntity, action: String): List<XtreamCategoryDto> = runCatching {
         val raw = httpClient.get(endpoint) {
             header("User-Agent", IPTV_USER_AGENT)
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", action)
         }.body<String>().trim()
-
         if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
-
         val parsed = jsonParser.parseToJsonElement(raw)
         val resultList = mutableListOf<XtreamCategoryDto>()
-
         when (parsed) {
-            is JsonArray -> {
-                for (item in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
-            is JsonObject -> {
-                for ((_, item) in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
+            is JsonArray -> for (item in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+            is JsonObject -> for ((_, item) in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
             else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
 
-    private suspend fun fetchLiveStreams(
-        endpoint: String,
-        playlist: PlaylistEntity
-    ): List<XtreamLiveStreamDto> = runCatching {
+    private suspend fun fetchLiveStreams(endpoint: String, playlist: PlaylistEntity): List<XtreamLiveStreamDto> = runCatching {
         val raw = httpClient.get(endpoint) {
             header("User-Agent", IPTV_USER_AGENT)
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", "get_live_streams")
         }.body<String>().trim()
-
         if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
-
         val parsed = jsonParser.parseToJsonElement(raw)
         val resultList = mutableListOf<XtreamLiveStreamDto>()
-
         when (parsed) {
-            is JsonArray -> {
-                for (item in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
-            is JsonObject -> {
-                for ((_, item) in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
+            is JsonArray -> for (item in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+            is JsonObject -> for ((_, item) in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
             else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
 
-    /**
-     * L10 Resilient VOD Parser: Liest JSON-Arrays [...] UND PHP-Assoziativ-Objekte {...}!
-     */
-    private suspend fun fetchVodStreams(
-        endpoint: String,
-        playlist: PlaylistEntity,
-        categoryId: String? = null
-    ): List<XtreamVodStreamDto> = runCatching {
+    private suspend fun fetchVodStreams(endpoint: String, playlist: PlaylistEntity, categoryId: String? = null): List<XtreamVodStreamDto> = runCatching {
         val raw = httpClient.get(endpoint) {
             header("User-Agent", IPTV_USER_AGENT)
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", "get_vod_streams")
-            if (!categoryId.isNullOrBlank()) {
-                parameter("category_id", categoryId)
-            }
+            if (!categoryId.isNullOrBlank()) parameter("category_id", categoryId)
         }.body<String>().trim()
-
         if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
-
         val parsed = jsonParser.parseToJsonElement(raw)
         val resultList = mutableListOf<XtreamVodStreamDto>()
-
         when (parsed) {
-            is JsonArray -> {
-                for (item in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
-            is JsonObject -> {
-                for ((_, item) in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
+            is JsonArray -> for (item in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+            is JsonObject -> for ((_, item) in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
             else -> Unit
         }
         resultList
     }.getOrDefault(emptyList())
 
-    private suspend fun fetchSeries(
-        endpoint: String,
-        playlist: PlaylistEntity,
-        categoryId: String? = null
-    ): List<XtreamSeriesDto> = runCatching {
+    private suspend fun fetchSeries(endpoint: String, playlist: PlaylistEntity, categoryId: String? = null): List<XtreamSeriesDto> = runCatching {
         val raw = httpClient.get(endpoint) {
             header("User-Agent", IPTV_USER_AGENT)
             parameter("username", playlist.username)
             parameter("password", playlist.password)
             parameter("action", "get_series")
-            if (!categoryId.isNullOrBlank()) {
-                parameter("category_id", categoryId)
-            }
+            if (!categoryId.isNullOrBlank()) parameter("category_id", categoryId)
         }.body<String>().trim()
-
         if (!raw.startsWith("[") && !raw.startsWith("{")) return@runCatching emptyList()
-
         val parsed = jsonParser.parseToJsonElement(raw)
         val resultList = mutableListOf<XtreamSeriesDto>()
-
         when (parsed) {
-            is JsonArray -> {
-                for (item in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
-            is JsonObject -> {
-                for ((_, item) in parsed) {
-                    if (item is JsonObject) {
-                        runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
-                    }
-                }
-            }
+            is JsonArray -> for (item in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
+            is JsonObject -> for ((_, item) in parsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement(item)) }
             else -> Unit
         }
         resultList
