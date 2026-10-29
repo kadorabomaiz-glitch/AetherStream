@@ -62,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,8 +83,6 @@ private val ObsidianSurface = Color(0xFF0D131F)
 private val ObsidianHeaderSurface = Color(0xFF131C2E)
 private val CyberCyan = Color(0xFF00F0FF)
 private val ElectricBlue = Color(0xFF38BDF8)
-private val EmeraldGreen = Color(0xFF10B981)
-private val AmberGold = Color(0xFFF59E0B)
 private val PureWhite = Color(0xFFFFFFFF)
 private val TextPrimary = Color(0xFFF8FAFC)
 private val TextSecondary = Color(0xFF94A3B8)
@@ -92,10 +91,55 @@ private val FocusedTextSecondary = Color(0xFF334155)
 private val GlassBorderCyan = CyberCyan.copy(alpha = 0.35f)
 
 // ====================================================================================================
-// 2. REACTIVE SETTINGS STATE MODEL & NON-BLOCKING STORE
+// 2. FOCUS HANDSHAKE & ENGINE HOT-SWAP CONTRACTS
+// ====================================================================================================
+
+/**
+ * Tracks which cockpit zone opened the 340.dp Settings Overlay so D-Pad focus
+ * is deterministically returned to the exact origin on dismiss.
+ */
+enum class AetherSettingsFocusOrigin {
+    NONE,
+    COCKPIT_NAV_RAIL,
+    FULLSCREEN_HUD_CAROUSEL
+}
+
+/**
+ * Deterministic Media3 LoadControl buffer configuration mapped from Bild 8 ("Puffergröße").
+ */
+data class AetherBufferLoadControlSpec(
+    val presetLabel: String,
+    val enginePresetKey: String,
+    val minBufferMs: Int,
+    val maxBufferMs: Int,
+    val bufferForPlaybackMs: Int,
+    val bufferForPlaybackAfterRebufferMs: Int
+)
+
+/**
+ * Hot-Swap runtime payload emitted to AndroidMedia3PlayerEngine whenever playback settings change.
+ */
+data class AetherMedia3HotSwapConfig(
+    val bufferSpec: AetherBufferLoadControlSpec,
+    val tunneledPlaybackEnabled: Boolean,
+    val audioPassthroughEnabled: Boolean,
+    val preferSurroundAudio: Boolean,
+    val autoFrameRateMode: String,
+    val hardwareAudioDecoder: Boolean,
+    val hardwareVideoDecoder: Boolean,
+    val amlogicFixEnabled: Boolean,
+    val userAgent: String
+)
+
+// ====================================================================================================
+// 3. REACTIVE SETTINGS STATE MODEL & NON-BLOCKING STORE
 // ====================================================================================================
 
 data class AetherSettingsState(
+    // Focus Handshake State
+    val isDrawerOpen: Boolean = false,
+    val focusOrigin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.NONE,
+
     // Bild 2 & 3: Allgemein
     val autoStartOnBoot: Boolean = false,
     val autoWakeFromSleep: Boolean = false,
@@ -193,34 +237,139 @@ object AetherSettingsStore {
         _state.value = loadedState
     }
 
+    /**
+     * Opens the Settings Overlay and records the exact D-Pad origin (Zone 1 Rail vs. Fullscreen HUD).
+     */
+    fun openDrawer(origin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL) {
+        _state.update { current ->
+            current.copy(isDrawerOpen = true, focusOrigin = origin)
+        }
+    }
+
+    /**
+     * Closes the Settings Overlay and returns the recorded origin for deterministic focus restoration.
+     */
+    fun closeDrawer(): AetherSettingsFocusOrigin {
+        val origin = _state.value.focusOrigin
+        _state.update { current ->
+            current.copy(isDrawerOpen = false, focusOrigin = AetherSettingsFocusOrigin.NONE)
+        }
+        return origin
+    }
+
+    /**
+     * Sanitizes raw Xtream / M3U server URLs into clean TiviMate hostnames (e.g. "line.trxdnscloud.ru")
+     * and updates live channel, movie, and series counters for Bild 4.
+     */
     fun updateLivePlaylistMetrics(
-        playlistName: String,
+        playlistNameOrUrl: String,
         channelsCount: Int,
         moviesCount: Int,
         seriesCount: Int
     ) {
+        val cleanHost = sanitizePlaylistHostname(playlistNameOrUrl)
         _state.update { current ->
-            current.copy(
-                activePlaylistName = playlistName.ifBlank { current.activePlaylistName },
-                activePlaylistChannelsCount = channelsCount,
-                activePlaylistMoviesCount = moviesCount,
-                activePlaylistSeriesCount = seriesCount
-            )
+            val resolvedName = cleanHost.ifBlank { current.activePlaylistName }
+            if (
+                current.activePlaylistName == resolvedName &&
+                current.activePlaylistChannelsCount == channelsCount &&
+                current.activePlaylistMoviesCount == moviesCount &&
+                current.activePlaylistSeriesCount == seriesCount
+            ) {
+                current
+            } else {
+                current.copy(
+                    activePlaylistName = resolvedName,
+                    activePlaylistChannelsCount = channelsCount.coerceAtLeast(0),
+                    activePlaylistMoviesCount = moviesCount.coerceAtLeast(0),
+                    activePlaylistSeriesCount = seriesCount.coerceAtLeast(0)
+                )
+            }
         }
     }
 
     fun updateEpgSyncTelemetry(channelsCount: Int, formattedTimestamp: String) {
         updateState { current ->
             current.copy(
-                epgLastUpdatedChannelsCount = channelsCount,
-                epgLastUpdatedTimestamp = formattedTimestamp
+                epgLastUpdatedChannelsCount = channelsCount.coerceAtLeast(0),
+                epgLastUpdatedTimestamp = formattedTimestamp.ifBlank { current.epgLastUpdatedTimestamp }
             )
         }
+    }
+
+    fun resolveBufferSpec(presetName: String = _state.value.bufferSizePreset): AetherBufferLoadControlSpec {
+        return when (presetName) {
+            "Keine" -> AetherBufferLoadControlSpec(
+                presetLabel = "Keine",
+                enginePresetKey = "ULTRA_LOW_LATENCY",
+                minBufferMs = 1_500,
+                maxBufferMs = 4_000,
+                bufferForPlaybackMs = 400,
+                bufferForPlaybackAfterRebufferMs = 1_000
+            )
+            "Klein" -> AetherBufferLoadControlSpec(
+                presetLabel = "Klein",
+                enginePresetKey = "LOW_LATENCY",
+                minBufferMs = 4_000,
+                maxBufferMs = 12_000,
+                bufferForPlaybackMs = 800,
+                bufferForPlaybackAfterRebufferMs = 2_000
+            )
+            "Mittel" -> AetherBufferLoadControlSpec(
+                presetLabel = "Mittel",
+                enginePresetKey = "BALANCED",
+                minBufferMs = 12_000,
+                maxBufferMs = 30_000,
+                bufferForPlaybackMs = 1_500,
+                bufferForPlaybackAfterRebufferMs = 3_000
+            )
+            "Groß" -> AetherBufferLoadControlSpec(
+                presetLabel = "Groß",
+                enginePresetKey = "HIGH_STABILITY",
+                minBufferMs = 25_000,
+                maxBufferMs = 50_000,
+                bufferForPlaybackMs = 2_500,
+                bufferForPlaybackAfterRebufferMs = 5_000
+            )
+            else -> AetherBufferLoadControlSpec(
+                presetLabel = "Sehr groß",
+                enginePresetKey = "MAX_RESILIENCE",
+                minBufferMs = 40_000,
+                maxBufferMs = 80_000,
+                bufferForPlaybackMs = 3_500,
+                bufferForPlaybackAfterRebufferMs = 7_000
+            )
+        }
+    }
+
+    fun buildHotSwapConfig(state: AetherSettingsState = _state.value): AetherMedia3HotSwapConfig {
+        return AetherMedia3HotSwapConfig(
+            bufferSpec = resolveBufferSpec(state.bufferSizePreset),
+            tunneledPlaybackEnabled = state.tunneledPlayback,
+            audioPassthroughEnabled = state.audioPassthrough,
+            preferSurroundAudio = state.defaultSurroundAudioTrack,
+            autoFrameRateMode = state.autoFrameRateMode,
+            hardwareAudioDecoder = state.audioDecoder == "Hardware",
+            hardwareVideoDecoder = state.videoDecoder == "Hardware",
+            amlogicFixEnabled = state.amlogicFix == "Ein",
+            userAgent = state.userAgent
+        )
     }
 
     fun updateState(transform: (AetherSettingsState) -> AetherSettingsState) {
         val updated = _state.updateAndGet(transform)
         scheduleBackgroundFlush(updated)
+    }
+
+    private fun sanitizePlaylistHostname(rawInput: String): String {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) return ""
+        val withoutScheme = trimmed
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .removePrefix("rtmp://")
+        val hostWithPort = withoutScheme.substringBefore('/').substringBefore('?')
+        return hostWithPort.substringBefore(':').trim()
     }
 
     private fun <T> MutableStateFlow<T>.updateAndGet(function: (T) -> T): T {
@@ -244,7 +393,74 @@ object AetherSettingsStore {
 }
 
 // ====================================================================================================
-// 3. CASCADING NAVIGATION STATE MACHINE (3-LEVEL LIFO BACKSTACK)
+// 4. REACTIVE TELEMETRY & MEDIA3 HOT-SWAP BINDING COMPOSABLES (FOR AETHERAPP.KT)
+// ====================================================================================================
+
+/**
+ * Drop-in Side-Effect for AetherApp.kt:
+ * Automatically pushes live repository counts (Channels, VOD, Series) and EPG telemetry into
+ * AetherSettingsStore so Bild 4 and Bild 6 are always 100% synchronized.
+ */
+@Composable
+fun BindAetherSettingsLiveTelemetry(
+    activePlaylistUrlOrName: String,
+    liveChannelsCount: Int,
+    vodMoviesCount: Int,
+    seriesCount: Int,
+    epgUpdatedChannelsCount: Int = -1,
+    epgUpdatedTimestamp: String = ""
+) {
+    LaunchedEffect(activePlaylistUrlOrName, liveChannelsCount, vodMoviesCount, seriesCount) {
+        AetherSettingsStore.updateLivePlaylistMetrics(
+            playlistNameOrUrl = activePlaylistUrlOrName,
+            channelsCount = liveChannelsCount,
+            moviesCount = vodMoviesCount,
+            seriesCount = seriesCount
+        )
+    }
+
+    LaunchedEffect(epgUpdatedChannelsCount, epgUpdatedTimestamp) {
+        if (epgUpdatedChannelsCount >= 0 && epgUpdatedTimestamp.isNotBlank()) {
+            AetherSettingsStore.updateEpgSyncTelemetry(
+                channelsCount = epgUpdatedChannelsCount,
+                formattedTimestamp = epgUpdatedTimestamp
+            )
+        }
+    }
+}
+
+/**
+ * Drop-in Side-Effect for AetherApp.kt:
+ * Observes Playback & General parameters and fires immediate hot-swap updates to AndroidMedia3PlayerEngine
+ * without restarting the app or interrupting the surface lifecycle.
+ */
+@Composable
+fun BindAetherEngineParameters(
+    onApplyHotSwapConfig: (AetherMedia3HotSwapConfig) -> Unit
+) {
+    val state by AetherSettingsStore.state.collectAsState()
+
+    val hotSwapConfig = remember(
+        state.bufferSizePreset,
+        state.tunneledPlayback,
+        state.audioPassthrough,
+        state.defaultSurroundAudioTrack,
+        state.autoFrameRateMode,
+        state.audioDecoder,
+        state.videoDecoder,
+        state.amlogicFix,
+        state.userAgent
+    ) {
+        AetherSettingsStore.buildHotSwapConfig(state)
+    }
+
+    LaunchedEffect(hotSwapConfig) {
+        onApplyHotSwapConfig(hotSwapConfig)
+    }
+}
+
+// ====================================================================================================
+// 5. CASCADING NAVIGATION STATE MACHINE (3-LEVEL LIFO BACKSTACK)
 // ====================================================================================================
 
 enum class SettingsPageId(val title: String, val level: Int) {
@@ -304,14 +520,13 @@ data class SettingsNavFrame(
 )
 
 // ====================================================================================================
-// 4. UNIFIED 5-ROW TEMPLATE MODEL
+// 6. UNIFIED 5-ROW TEMPLATE MODEL
 // ====================================================================================================
 
 sealed interface SettingsRowModel {
     val id: String
     val isFocusable: Boolean
 
-    /** 1. Navigation Row (Drills down into sub-menu) */
     data class NavRow(
         override val id: String,
         val title: String,
@@ -321,7 +536,6 @@ sealed interface SettingsRowModel {
         override val isFocusable: Boolean = true
     }
 
-    /** 2. Toggle Switch Row (Title + Optional Subtitle + TiviMate Pill Switch) */
     data class ToggleRow(
         override val id: String,
         val title: String,
@@ -332,7 +546,6 @@ sealed interface SettingsRowModel {
         override val isFocusable: Boolean = true
     }
 
-    /** 3. Value Selector Row (Title + Current Value underneath -> Opens Level 3 Picker or Action) */
     data class ValueRow(
         override val id: String,
         val title: String,
@@ -343,7 +556,6 @@ sealed interface SettingsRowModel {
         override val isFocusable: Boolean = true
     }
 
-    /** 4. Section Header (Non-focusable CyberCyan divider, skipped automatically by D-Pad) */
     data class SectionHeader(
         override val id: String,
         val title: String
@@ -351,7 +563,6 @@ sealed interface SettingsRowModel {
         override val isFocusable: Boolean = false
     }
 
-    /** 5. Status / Playlist / Option Row (Checkmark or Telemetry Block) */
     data class StatusOrOptionRow(
         override val id: String,
         val title: String,
@@ -365,19 +576,25 @@ sealed interface SettingsRowModel {
 }
 
 // ====================================================================================================
-// 5. ROOT COMPOSABLE: AETHER 340.DP RIGHT-SIDE SETTINGS OVERLAY
+// 7. ROOT COMPOSABLE: AETHER 340.DP RIGHT-SIDE SETTINGS OVERLAY (Z-INDEX 60F)
 // ====================================================================================================
 
 @Composable
 fun AetherSettingsOverlay(
     isVisible: Boolean,
     onDismiss: () -> Unit,
+    focusOrigin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL,
+    navRailFocusRequester: FocusRequester? = null,
+    hudCarouselFocusRequester: FocusRequester? = null,
+    onRestoreFocusToOrigin: ((AetherSettingsFocusOrigin) -> Unit)? = null,
     onAddPlaylistRequested: () -> Unit = {},
     onRefreshPlaylistsRequested: () -> Unit = {},
     onRefreshEpgRequested: () -> Unit = {},
     onClearEpgRequested: () -> Unit = {},
     onBufferPresetChanged: (String) -> Unit = {},
     onUserAgentChanged: (String) -> Unit = {},
+    onTunneledPlaybackChanged: (Boolean) -> Unit = {},
+    onAudioPassthroughChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val settingsState by AetherSettingsStore.state.collectAsState()
@@ -388,7 +605,26 @@ fun AetherSettingsOverlay(
         mutableStateListOf(SettingsNavFrame(pageId = SettingsPageId.ROOT, focusedRowIndex = 0))
     }
 
-    // Reset stack cleanly when closed so reopening starts at Root Level 1
+    // Complete Focus Handshake: Dismisses overlay and routes D-Pad focus back to exact caller
+    fun executeDismissWithFocusHandshake() {
+        val resolvedOrigin = if (settingsState.focusOrigin != AetherSettingsFocusOrigin.NONE) {
+            AetherSettingsStore.closeDrawer()
+        } else {
+            focusOrigin
+        }
+        onDismiss()
+        onRestoreFocusToOrigin?.invoke(resolvedOrigin)
+        when (resolvedOrigin) {
+            AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL -> {
+                runCatching { hudCarouselFocusRequester?.requestFocus() }
+            }
+            AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL,
+            AetherSettingsFocusOrigin.NONE -> {
+                runCatching { navRailFocusRequester?.requestFocus() }
+            }
+        }
+    }
+
     LaunchedEffect(isVisible) {
         if (isVisible) {
             if (navStack.isEmpty()) {
@@ -415,12 +651,17 @@ fun AetherSettingsOverlay(
                     navStack.removeAt(navStack.lastIndex)
                 }
             },
-            onAddPlaylistRequested = onAddPlaylistRequested,
+            onAddPlaylistRequested = {
+                executeDismissWithFocusHandshake()
+                onAddPlaylistRequested()
+            },
             onRefreshPlaylistsRequested = onRefreshPlaylistsRequested,
             onRefreshEpgRequested = onRefreshEpgRequested,
             onClearEpgRequested = onClearEpgRequested,
             onBufferPresetChanged = onBufferPresetChanged,
-            onUserAgentChanged = onUserAgentChanged
+            onUserAgentChanged = onUserAgentChanged,
+            onTunneledPlaybackChanged = onTunneledPlaybackChanged,
+            onAudioPassthroughChanged = onAudioPassthroughChanged
         )
     }
 
@@ -441,14 +682,15 @@ fun AetherSettingsOverlay(
             animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
             targetOffsetX = { fullWidth -> fullWidth }
         ) + fadeOut(animationSpec = tween(160)),
-        modifier = modifier.fillMaxSize()
+        modifier = modifier
+            .fillMaxSize()
+            .zIndex(60f) // Anchored strictly at Z-Layer 60f above Cockpit & Modals
     ) {
         val listState = rememberLazyListState(
             initialFirstVisibleItemIndex = currentFrame.firstVisibleItemIndex,
             initialFirstVisibleItemScrollOffset = currentFrame.firstVisibleScrollOffset
         )
 
-        // Synchronize scroll viewport when navigating between pages or moving D-Pad focus
         LaunchedEffect(currentFrame.pageId) {
             runCatching {
                 listState.scrollToItem(
@@ -474,7 +716,6 @@ fun AetherSettingsOverlay(
             }
         }
 
-        // Helper functions for deterministic stack & focus management
         fun updateCurrentFrameFocus(newFocusIndex: Int) {
             if (navStack.isNotEmpty()) {
                 val topIndex = navStack.lastIndex
@@ -496,7 +737,6 @@ fun AetherSettingsOverlay(
                     firstVisibleScrollOffset = listState.firstVisibleItemScrollOffset
                 )
             }
-            // Pre-select current option index if entering a Level 3 Picker
             val targetRows = buildRowsForPage(
                 pageId = targetPage,
                 state = settingsState,
@@ -507,7 +747,9 @@ fun AetherSettingsOverlay(
                 onRefreshEpgRequested = onRefreshEpgRequested,
                 onClearEpgRequested = onClearEpgRequested,
                 onBufferPresetChanged = onBufferPresetChanged,
-                onUserAgentChanged = onUserAgentChanged
+                onUserAgentChanged = onUserAgentChanged,
+                onTunneledPlaybackChanged = onTunneledPlaybackChanged,
+                onAudioPassthroughChanged = onAudioPassthroughChanged
             )
             val preselectedIdx = targetRows.indexOfFirst {
                 it is SettingsRowModel.StatusOrOptionRow && it.isSelectedOption
@@ -527,7 +769,7 @@ fun AetherSettingsOverlay(
             if (navStack.size > 1) {
                 navStack.removeAt(navStack.lastIndex)
             } else {
-                onDismiss()
+                executeDismissWithFocusHandshake()
             }
         }
 
@@ -562,13 +804,12 @@ fun AetherSettingsOverlay(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = { onDismiss() }
+                    onClick = { executeDismissWithFocusHandshake() }
                 )
                 .focusRequester(drawerFocusRequester)
                 .focusable()
                 .onPreviewKeyEvent { keyEvent ->
                     if (keyEvent.type != KeyEventType.KeyDown) {
-                        // Strictly consume KeyUp as well so nothing leaks into the cockpit
                         return@onPreviewKeyEvent true
                     }
                     when (keyEvent.key) {
@@ -608,14 +849,13 @@ fun AetherSettingsOverlay(
                                 }
                                 else -> Unit
                             }
-                            // Strictly absorb DPAD_RIGHT to prevent focus escape
                             true
                         }
                         Key.DirectionLeft, Key.Back, Key.Escape -> {
                             popPageOrDismiss()
                             true
                         }
-                        else -> true // Strict Zone-Locking: Absorb any stray keys inside the modal
+                        else -> true
                     }
                 },
             contentAlignment = Alignment.CenterEnd
@@ -628,7 +868,7 @@ fun AetherSettingsOverlay(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClick = {} // Prevent scrim click-through inside the 340.dp panel
+                        onClick = {}
                     )
                     .border(
                         width = 1.dp,
@@ -739,7 +979,7 @@ fun AetherSettingsOverlay(
 }
 
 // ====================================================================================================
-// 6. DETERMINISTIC FOCUS INDEX TRAVERSAL (HEADER SKIPPING)
+// 8. DETERMINISTIC FOCUS INDEX TRAVERSAL (HEADER SKIPPING)
 // ====================================================================================================
 
 private fun findNextFocusableIndex(
@@ -755,12 +995,11 @@ private fun findNextFocusableIndex(
         }
         candidate += direction
     }
-    // Clamp strictly inside the list boundaries (0 focus bleed)
     return currentIndex.coerceIn(0, rows.lastIndex)
 }
 
 // ====================================================================================================
-// 7. THE 5-ROW TEMPLATE RENDERER (TIVIMATE WHITE-PILL LAW)
+// 9. THE 5-ROW TEMPLATE RENDERER (TIVIMATE WHITE-PILL LAW)
 // ====================================================================================================
 
 @Composable
@@ -771,7 +1010,6 @@ private fun SettingsUnifiedRowItem(
 ) {
     when (row) {
         is SettingsRowModel.SectionHeader -> {
-            // Blueprint 5, 10, 11: Non-focusable CyberCyan Section Header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -896,7 +1134,6 @@ private fun SettingsUnifiedRowItem(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (row.showCheckmarkCircle) {
-                        // Blueprint 4: Circular Checkmark Badge for Active Playlist
                         Box(
                             modifier = Modifier
                                 .size(24.dp)
@@ -916,7 +1153,6 @@ private fun SettingsUnifiedRowItem(
                         }
                         Spacer(modifier = Modifier.width(14.dp))
                     } else if (row.isSelectedOption) {
-                        // Level 3 Picker Radio Indicator
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
@@ -953,11 +1189,6 @@ private fun SettingsUnifiedRowItem(
     }
 }
 
-/**
- * Enforces the TiviMate White-Pill Law:
- * - Unfocused: Transparent glass row, #F8FAFC primary text, #94A3B8 secondary text.
- * - Focused: Solid #FFFFFF pill, #07090E Obsidian black text, #334155 secondary text, subtle scale.
- */
 @Composable
 private fun WhitePillFocusContainer(
     isFocused: Boolean,
@@ -1010,9 +1241,6 @@ private fun WhitePillFocusContainer(
     }
 }
 
-/**
- * Custom TiviMate-styled Switch matching Blueprints 2, 5, 8, 9, 10, 11.
- */
 @Composable
 private fun TiviMatePillSwitch(
     checked: Boolean,
@@ -1044,7 +1272,6 @@ private fun TiviMatePillSwitch(
             .height(22.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        // Track
         Box(
             modifier = Modifier
                 .width(34.dp)
@@ -1052,7 +1279,6 @@ private fun TiviMatePillSwitch(
                 .clip(RoundedCornerShape(7.dp))
                 .background(trackColor)
         )
-        // Circular Thumb
         Box(
             modifier = Modifier
                 .offset(x = thumbOffset)
@@ -1069,7 +1295,7 @@ private fun TiviMatePillSwitch(
 }
 
 // ====================================================================================================
-// 8. COMPLETE 12-BLUEPRINT MENU MATRIX BUILDER (LEVEL 1, LEVEL 2, LEVEL 3)
+// 10. COMPLETE 12-BLUEPRINT MENU MATRIX BUILDER (LEVEL 1, LEVEL 2, LEVEL 3)
 // ====================================================================================================
 
 private fun buildRowsForPage(
@@ -1082,13 +1308,12 @@ private fun buildRowsForPage(
     onRefreshEpgRequested: () -> Unit,
     onClearEpgRequested: () -> Unit,
     onBufferPresetChanged: (String) -> Unit,
-    onUserAgentChanged: (String) -> Unit
+    onUserAgentChanged: (String) -> Unit,
+    onTunneledPlaybackChanged: (Boolean) -> Unit,
+    onAudioPassthroughChanged: (Boolean) -> Unit
 ): List<SettingsRowModel> {
     return when (pageId) {
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 1: LEVEL 1 HAUPTMENÜ ("Einstellungen")
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.ROOT -> listOf(
             SettingsRowModel.NavRow("root_general", "Allgemein", targetPage = SettingsPageId.GENERAL),
             SettingsRowModel.NavRow("root_playlists", "Wiedergabelisten", targetPage = SettingsPageId.PLAYLISTS),
@@ -1101,9 +1326,6 @@ private fun buildRowsForPage(
             SettingsRowModel.NavRow("root_about", "Über", targetPage = SettingsPageId.ABOUT)
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 2 & BILD 3: "Allgemein"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.GENERAL -> listOf(
             SettingsRowModel.ToggleRow(
                 id = "gen_boot",
@@ -1169,9 +1391,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 4: "Wiedergabelisten"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.PLAYLISTS -> listOf(
             SettingsRowModel.StatusOrOptionRow(
                 id = "pl_active",
@@ -1192,9 +1411,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 5 & BILD 6: "EPG"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.EPG -> listOf(
             SettingsRowModel.StatusOrOptionRow(
                 id = "epg_sources",
@@ -1262,9 +1478,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 7: "Optik"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.APPEARANCE -> listOf(
             SettingsRowModel.NavRow("opt_epg", "EPG", targetPage = SettingsPageId.APPEARANCE_EPG),
             SettingsRowModel.NavRow("opt_player", "Player", targetPage = SettingsPageId.APPEARANCE_PLAYER),
@@ -1296,9 +1509,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 8 & BILD 9: "Wiedergabe"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.PLAYBACK -> listOf(
             SettingsRowModel.ValueRow(
                 id = "pb_buffer",
@@ -1334,13 +1544,19 @@ private fun buildRowsForPage(
                 id = "pb_passthrough",
                 title = "Audio-Passthrough",
                 checked = state.audioPassthrough,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(audioPassthrough = enabled) } }
+                onToggle = { enabled ->
+                    AetherSettingsStore.updateState { it.copy(audioPassthrough = enabled) }
+                    onAudioPassthroughChanged(enabled)
+                }
             ),
             SettingsRowModel.ToggleRow(
                 id = "pb_tunneling",
                 title = "Getunnelte Wiedergabe",
                 checked = state.tunneledPlayback,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(tunneledPlayback = enabled) } }
+                onToggle = { enabled ->
+                    AetherSettingsStore.updateState { it.copy(tunneledPlayback = enabled) }
+                    onTunneledPlaybackChanged(enabled)
+                }
             ),
             SettingsRowModel.ValueRow(
                 id = "pb_amlogic",
@@ -1356,9 +1572,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 10: "Fernbedienung"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.REMOTE -> listOf(
             SettingsRowModel.NavRow("rem_epg", "EPG", targetPage = SettingsPageId.REMOTE_EPG),
             SettingsRowModel.NavRow("rem_player", "Player", targetPage = SettingsPageId.REMOTE_PLAYER),
@@ -1398,9 +1611,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 11: "Kindersicherung"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.PARENTAL -> listOf(
             SettingsRowModel.ToggleRow(
                 id = "par_enable",
@@ -1465,9 +1675,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 12: "Sonstiges"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.MISC -> listOf(
             SettingsRowModel.NavRow("misc_search", "Suchen", targetPage = SettingsPageId.MISC_SEARCH),
             SettingsRowModel.NavRow("misc_reminders", "Erinnerungen", targetPage = SettingsPageId.MISC_REMINDERS),
@@ -1475,9 +1682,6 @@ private fun buildRowsForPage(
             SettingsRowModel.NavRow("misc_vod", "VOD", targetPage = SettingsPageId.MISC_VOD)
         )
 
-        // --------------------------------------------------------------------------------------------
-        // BILD 1: "Über"
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.ABOUT -> listOf(
             SettingsRowModel.StatusOrOptionRow(
                 id = "about_version",
@@ -1499,9 +1703,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // LEVEL 2+ SUB-MENUS (Optik, Fernbedienung, Sonstiges Detailseiten)
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.APPEARANCE_EPG -> listOf(
             SettingsRowModel.ValueRow(
                 id = "app_epg_slot",
@@ -1622,9 +1823,6 @@ private fun buildRowsForPage(
             )
         )
 
-        // --------------------------------------------------------------------------------------------
-        // LEVEL 3 INLINE VALUE PICKERS (Radio-Selection Lists inside 340.dp Drawer)
-        // --------------------------------------------------------------------------------------------
         SettingsPageId.PICKER_USER_AGENT -> buildPickerRows(
             options = listOf("VLC", "TiviMate/4.7.0 (Linux; Android 11)", "ExoPlayer/1.4.1", "Lavf/60.3.100"),
             selected = state.userAgent,
