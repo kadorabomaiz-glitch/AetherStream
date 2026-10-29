@@ -97,6 +97,18 @@ interface AetherDao {
     suspend fun getStreamCountInCategory(uniqueCategoryKey: String): Int
 
     @Query("""
+        SELECT COUNT(*) FROM stream_items 
+        WHERE playlistId = :playlistId 
+          AND sectionType = :sectionType 
+          AND isVisible = 1 
+          AND isLocked = 0
+    """)
+    suspend fun getVisibleStreamCountForSection(
+        playlistId: Long,
+        sectionType: AetherSectionType
+    ): Int
+
+    @Query("""
         SELECT * FROM categories 
         WHERE playlistId = :playlistId 
           AND sectionType = :sectionType 
@@ -247,6 +259,91 @@ interface AetherDao {
 
     @Query("DELETE FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey")
     suspend fun deleteEpisodesForSeries(seriesStreamKey: String)
+
+    // ==========================================
+    // PHASE 3: EPG TIMELINE MATRIX, BATCH-CHUNKING & PRUNING
+    // ==========================================
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEpgProgramsChunk(programs: List<EpgProgramEntity>)
+
+    /**
+     * Schreibt große EPG-Datenmengen in performanten 2.000er-Transaktions-Chunks weg,
+     * um OOM-Abstürze und SQLite-WAL-Blockaden auf dem Fire TV zu verhindern.
+     */
+    @Transaction
+    suspend fun insertEpgProgramsInBatches(programs: List<EpgProgramEntity>) {
+        if (programs.isEmpty()) return
+        programs.chunked(2000).forEach { batch ->
+            insertEpgProgramsChunk(batch)
+        }
+    }
+
+    /**
+     * Reaktive Zeitfenster-Abfrage für den aktuell fokussierten/laufenden Kanal (Zone 3 & Zone 4).
+     * Nutzt den B-Tree-Index (epgChannelId, startEpochMillis, endEpochMillis).
+     */
+    @Query("""
+        SELECT * FROM epg_programs 
+        WHERE epgChannelId = :epgChannelId 
+          AND endEpochMillis > :windowStartMs 
+          AND startEpochMillis < :windowEndMs 
+        ORDER BY startEpochMillis ASC 
+        LIMIT 40
+    """)
+    fun observeEpgForChannelInWindow(
+        epgChannelId: String,
+        windowStartMs: Long,
+        windowEndMs: Long
+    ): Flow<List<EpgProgramEntity>>
+
+    @Query("""
+        SELECT * FROM epg_programs 
+        WHERE epgChannelId = :epgChannelId 
+          AND endEpochMillis > :windowStartMs 
+          AND startEpochMillis < :windowEndMs 
+        ORDER BY startEpochMillis ASC 
+        LIMIT 40
+    """)
+    suspend fun getEpgForChannelInWindow(
+        epgChannelId: String,
+        windowStartMs: Long,
+        windowEndMs: Long
+    ): List<EpgProgramEntity>
+
+    /**
+     * Gebündelte Viewport-Abfrage für die sichtbaren Kanäle in Zone 4 innerhalb des 2-Stunden-Fensters.
+     */
+    @Query("""
+        SELECT * FROM epg_programs 
+        WHERE epgChannelId IN (:epgChannelIds) 
+          AND endEpochMillis > :windowStartMs 
+          AND startEpochMillis < :windowEndMs 
+        ORDER BY epgChannelId ASC, startEpochMillis ASC
+    """)
+    suspend fun getEpgForChannelsBatchInWindow(
+        epgChannelIds: List<String>,
+        windowStartMs: Long,
+        windowEndMs: Long
+    ): List<EpgProgramEntity>
+
+    @Query("SELECT COUNT(DISTINCT epgChannelId) FROM epg_programs")
+    suspend fun getDistinctEpgChannelsCount(): Int
+
+    @Query("DELETE FROM epg_programs WHERE epgChannelId = :epgChannelId")
+    suspend fun deleteEpgForChannel(epgChannelId: String)
+
+    /**
+     * Automatisches EPG-Pruning: Entfernt alle abgelaufenen Sendungen vor :cutoffEpochMillis (Bild 5).
+     */
+    @Query("DELETE FROM epg_programs WHERE endEpochMillis < :cutoffEpochMillis")
+    suspend fun deleteExpiredEpgProgramsBefore(cutoffEpochMillis: Long)
+
+    /**
+     * Komplett-Reset bei Klick auf „EPG -> Löschen“ (Bild 5 & 6).
+     */
+    @Query("DELETE FROM epg_programs")
+    suspend fun clearAllEpgPrograms()
 }
 
 @Database(
