@@ -44,11 +44,6 @@ data class CategoryEntity(
     val customSortOrder: Int = 0
 )
 
-/**
- * L10 ZERO-DROP COMPOSITE PRIMARY KEY MATRIX:
- * Kombiniert (providerStreamId, uniqueCategoryKey, name), damit identische Stream-IDs
- * in verschiedenen Kategorien oder unter unterschiedlichen Feed-Namen niemals verworfen werden.
- */
 @Entity(
     tableName = "stream_items",
     primaryKeys = ["providerStreamId", "uniqueCategoryKey", "name"],
@@ -78,7 +73,22 @@ data class StreamItemEntity(
     val plotDescription: String? = null,
     val resumePositionMs: Long = 0L,
     val totalDurationMs: Long = 0L,
-    val lastWatchedEpochMillis: Long = 0L
+    val lastWatchedEpochMillis: Long = 0L,
+    val preferredAudioTrackId: String? = null,
+    val preferredSubtitleTrackId: String? = null,
+    val audioDelayMs: Int = 0
+)
+
+/**
+ * MODUL 3: Persistente Auto-Memory Matrix für Audio-Track, Untertitel-Track & Audio-Delay pro Stream.
+ */
+@Entity(tableName = "stream_settings")
+data class StreamSettingsEntity(
+    @PrimaryKey val uniqueStreamKey: String,
+    val preferredAudioTrackId: String? = null,
+    val preferredSubtitleTrackId: String? = null,
+    val audioDelayMs: Int = 0,
+    val updatedAtEpochMillis: Long = 0L
 )
 
 @Entity(tableName = "favorite_folders")
@@ -102,7 +112,10 @@ data class FavoriteFolderMappingEntity(
 
 @Entity(
     tableName = "epg_programs",
-    indices = [Index(value = ["epgChannelId", "startEpochMillis", "endEpochMillis"])]
+    indices = [
+        Index(value = ["epgChannelId", "startEpochMillis", "endEpochMillis"]),
+        Index(value = ["normalizedChannelName", "startEpochMillis", "endEpochMillis"])
+    ]
 )
 data class EpgProgramEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
@@ -110,7 +123,8 @@ data class EpgProgramEntity(
     val title: String,
     val description: String?,
     val startEpochMillis: Long,
-    val endEpochMillis: Long
+    val endEpochMillis: Long,
+    val normalizedChannelName: String = ""
 )
 
 @Entity(
