@@ -44,16 +44,23 @@ data class CategoryEntity(
     val customSortOrder: Int = 0
 )
 
+/**
+ * L10 ZERO-DROP COMPOSITE PRIMARY KEY MATRIX:
+ * Kombiniert (providerStreamId, uniqueCategoryKey, name), damit identische Stream-IDs
+ * in verschiedenen Kategorien oder unter unterschiedlichen Feed-Namen niemals verworfen werden.
+ */
 @Entity(
     tableName = "stream_items",
+    primaryKeys = ["providerStreamId", "uniqueCategoryKey", "name"],
     indices = [
+        Index(value = ["uniqueStreamKey"], unique = true),
         Index(value = ["uniqueCategoryKey", "isVisible", "isLocked"]),
         Index(value = ["playlistId", "sectionType", "isQuickFavorite"]),
         Index(value = ["playlistId", "lastWatchedEpochMillis"])
     ]
 )
 data class StreamItemEntity(
-    @PrimaryKey val uniqueStreamKey: String,
+    val uniqueStreamKey: String,
     val playlistId: Long,
     val providerStreamId: Int,
     val uniqueCategoryKey: String,
@@ -106,10 +113,6 @@ data class EpgProgramEntity(
     val endEpochMillis: Long
 )
 
-// ============================================================
-// PHASE 2: SERIEN-EPISODEN & FORTSCHRITT
-// ============================================================
-
 @Entity(
     tableName = "series_episodes",
     indices = [
@@ -119,7 +122,7 @@ data class EpgProgramEntity(
     ]
 )
 data class SeriesEpisodeEntity(
-    @PrimaryKey val uniqueEpisodeKey: String, // Format: "${seriesStreamKey}_s${seasonNumber}_e${episodeNumber}"
+    @PrimaryKey val uniqueEpisodeKey: String,
     val seriesStreamKey: String,
     val seasonNumber: Int,
     val episodeNumber: Int,
