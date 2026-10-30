@@ -2,17 +2,7 @@ package com.aether.stream
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -23,14 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +35,7 @@ import com.aether.stream.core.theme.AetherTheme
 import com.aether.stream.core.ui.AetherFocusableGlassCard
 import com.aether.stream.data.local.AetherDao
 import com.aether.stream.data.local.AetherSectionType
+import com.aether.stream.data.local.EpgProgramEntity
 import com.aether.stream.data.local.FavoriteFolderEntity
 import com.aether.stream.data.local.FavoriteFolderMappingEntity
 import com.aether.stream.data.local.PlaylistEntity
@@ -101,12 +85,12 @@ fun AetherApp(
     var activeSeriesForModal by remember { mutableStateOf<StreamItemEntity?>(null) }
     var isCinemaPlayerActive by remember { mutableStateOf(false) }
     var folderDialogTargetStream by remember { mutableStateOf<StreamItemEntity?>(null) }
+    var activeChannelEpgList by remember { mutableStateOf<List<EpgProgramEntity>>(emptyList()) }
 
     var isSearchModalVisible by remember { mutableStateOf(false) }
     var isSettingsModalVisible by remember { mutableStateOf(false) }
     var isLoadingCategoryStreams by remember { mutableStateOf(false) }
 
-    // Focus Handshake Requesters for Zone 1 Rail & Fullscreen HUD return
     val cockpitRootFocusRequester = remember { FocusRequester() }
     val hudSettingsReturnFocusRequester = remember { FocusRequester() }
 
@@ -118,49 +102,20 @@ fun AetherApp(
     }.collectAsState(initial = emptyList())
 
     val visibleCategories by remember(playlistId, selectedSection) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection)
-        else flowOf(emptyList())
-    }.collectAsState(initial = emptyList())
-
-    // Observe all 3 section category lists for real-time Bild 4 telemetry counters
-    val liveCategoriesAll by remember(playlistId) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, AetherSectionType.LIVE)
-        else flowOf(emptyList())
-    }.collectAsState(initial = emptyList())
-
-    val vodCategoriesAll by remember(playlistId) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, AetherSectionType.VOD)
-        else flowOf(emptyList())
-    }.collectAsState(initial = emptyList())
-
-    val seriesCategoriesAll by remember(playlistId) {
-        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, AetherSectionType.SERIES)
-        else flowOf(emptyList())
+        if (playlistId > 0L) dao.observeVisibleCategories(playlistId, selectedSection) else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
     var liveTotalCount by remember { mutableStateOf(18957) }
     var vodTotalCount by remember { mutableStateOf(72231) }
     var seriesTotalCount by remember { mutableStateOf(13926) }
 
-    LaunchedEffect(
-        playlistId,
-        liveCategoriesAll.size,
-        vodCategoriesAll.size,
-        seriesCategoriesAll.size,
-        isLoadingCategoryStreams
-    ) {
+    LaunchedEffect(playlistId, visibleCategories.size, isLoadingCategoryStreams) {
         if (playlistId > 0L) {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    val computedLive = liveCategoriesAll.sumOf { cat ->
-                        dao.getStreamCountInCategory(cat.uniqueCategoryKey)
-                    }
-                    val computedVod = vodCategoriesAll.sumOf { cat ->
-                        dao.getStreamCountInCategory(cat.uniqueCategoryKey)
-                    }
-                    val computedSeries = seriesCategoriesAll.sumOf { cat ->
-                        dao.getStreamCountInCategory(cat.uniqueCategoryKey)
-                    }
+                    val computedLive = dao.getVisibleStreamCountForSection(playlistId, AetherSectionType.LIVE)
+                    val computedVod = dao.getVisibleStreamCountForSection(playlistId, AetherSectionType.VOD)
+                    val computedSeries = dao.getVisibleStreamCountForSection(playlistId, AetherSectionType.SERIES)
                     if (computedLive > 0) liveTotalCount = computedLive
                     if (computedVod > 0) vodTotalCount = computedVod
                     if (computedSeries > 0) seriesTotalCount = computedSeries
@@ -169,7 +124,35 @@ fun AetherApp(
         }
     }
 
-    // Bind live playlist host and counters into AetherSettingsStore (Bild 4)
+    // Live EPG On-Demand Hydration for active Live-TV channel
+    LaunchedEffect(currentPlayingStream?.uniqueStreamKey) {
+        val stream = currentPlayingStream
+        if (stream == null || stream.sectionType != AetherSectionType.LIVE) {
+            activeChannelEpgList = emptyList()
+        } else {
+            val channelKey = stream.epgChannelId?.takeIf { it.isNotBlank() } ?: stream.uniqueStreamKey
+            val nowMs = Clock.System.now().toEpochMilliseconds()
+            val cached = withContext(Dispatchers.IO) {
+                runCatching {
+                    dao.getEpgForChannelInWindow(
+                        epgChannelId = channelKey,
+                        windowStartMs = nowMs - 3_600_000L,
+                        windowEndMs = nowMs + 21_600_000L
+                    )
+                }.getOrDefault(emptyList())
+            }
+            if (cached.isNotEmpty()) {
+                activeChannelEpgList = cached
+            }
+            val freshRemote = withContext(Dispatchers.IO) {
+                runCatching { dashboardViewModel.fetchShortEpgForChannelOnDemand(stream) }.getOrDefault(emptyList())
+            }
+            if (freshRemote.isNotEmpty()) {
+                activeChannelEpgList = freshRemote
+            }
+        }
+    }
+
     val resolvedPlaylistUrlOrName = remember(activePlaylist) {
         activePlaylist?.serverUrl?.takeIf { it.isNotBlank() }
             ?: activePlaylist?.playlistName?.takeIf { it.isNotBlank() }
@@ -183,7 +166,6 @@ fun AetherApp(
         seriesCount = seriesTotalCount
     )
 
-    // Bind hot-swap engine parameters to AetherVideoPlayerEngine (Bild 8 & 9)
     BindAetherEngineParameters(
         onApplyHotSwapConfig = { hotSwapConfig ->
             val availablePresets = StreamBufferPreset.entries
@@ -205,12 +187,8 @@ fun AetherApp(
 
     LaunchedEffect(visibleCategories, selectedSection) {
         if (visibleCategories.isNotEmpty()) {
-            val isSystemKey = selectedCategoryKey == "SYS_QUICK_FAV" ||
-                selectedCategoryKey == "SYS_RECENT" ||
-                selectedCategoryKey.startsWith("FOLDER_")
-            val isCurrentKeyInThisSection = isSystemKey ||
-                visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey }
-
+            val isSystemKey = selectedCategoryKey == "SYS_QUICK_FAV" || selectedCategoryKey == "SYS_RECENT" || selectedCategoryKey.startsWith("FOLDER_")
+            val isCurrentKeyInThisSection = isSystemKey || visibleCategories.any { it.uniqueCategoryKey == selectedCategoryKey }
             if (selectedCategoryKey.isEmpty() || !isCurrentKeyInThisSection) {
                 selectedCategoryKey = visibleCategories.first().uniqueCategoryKey
             }
@@ -224,10 +202,8 @@ fun AetherApp(
             flowOf(emptyList())
         } else {
             when {
-                selectedCategoryKey == "SYS_RECENT" ->
-                    dao.observeRecentlyWatched(playlistId, selectedSection)
-                selectedCategoryKey == "SYS_QUICK_FAV" ->
-                    dao.observeQuickFavorites(playlistId, selectedSection)
+                selectedCategoryKey == "SYS_RECENT" -> dao.observeRecentlyWatched(playlistId, selectedSection)
+                selectedCategoryKey == "SYS_QUICK_FAV" -> dao.observeQuickFavorites(playlistId, selectedSection)
                 selectedCategoryKey.startsWith("FOLDER_") -> {
                     val folderId = selectedCategoryKey.removePrefix("FOLDER_").toLongOrNull() ?: 0L
                     dao.observeStreamsInFavoriteFolder(folderId)
@@ -247,22 +223,15 @@ fun AetherApp(
     }
 
     LaunchedEffect(selectedCategoryKey, selectedSection) {
-        val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" ||
-            selectedCategoryKey == "SYS_RECENT" ||
-            selectedCategoryKey.startsWith("FOLDER_")
-
+        val isSystemCategory = selectedCategoryKey == "SYS_QUICK_FAV" || selectedCategoryKey == "SYS_RECENT" || selectedCategoryKey.startsWith("FOLDER_")
         if (!isSystemCategory && selectedCategoryKey.isNotEmpty() && selectedSection != AetherSectionType.LIVE) {
             if (fetchedCategoryKeys.add(selectedCategoryKey)) {
                 val matchingCat = visibleCategories.firstOrNull { it.uniqueCategoryKey == selectedCategoryKey }
                 if (matchingCat != null) {
-                    val streamCount = withContext(Dispatchers.IO) {
-                        dao.getStreamCountInCategory(matchingCat.uniqueCategoryKey)
-                    }
+                    val streamCount = withContext(Dispatchers.IO) { dao.getStreamCountInCategory(matchingCat.uniqueCategoryKey) }
                     if (streamCount == 0) {
                         isLoadingCategoryStreams = true
-                        withContext(Dispatchers.IO) {
-                            runCatching { dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat) }
-                        }
+                        withContext(Dispatchers.IO) { runCatching { dashboardViewModel.fetchCategoryStreamsOnDemand(matchingCat) } }
                         isLoadingCategoryStreams = false
                     }
                 }
@@ -283,27 +252,10 @@ fun AetherApp(
             val ep = currentPlayingEpisode
             val st = currentPlayingStream
             if (ep != null) {
-                dao.updateEpisodeWatchProgress(
-                    uniqueEpisodeKey = ep.uniqueEpisodeKey,
-                    positionMs = effectivePos,
-                    durationMs = dur.coerceAtLeast(0L),
-                    watchedAt = now
-                )
-                activeParentSeriesKey?.let { seriesKey ->
-                    dao.updateWatchProgress(
-                        uniqueStreamKey = seriesKey,
-                        positionMs = effectivePos,
-                        durationMs = dur.coerceAtLeast(0L),
-                        watchedAt = now
-                    )
-                }
+                dao.updateEpisodeWatchProgress(ep.uniqueEpisodeKey, effectivePos, dur.coerceAtLeast(0L), now)
+                activeParentSeriesKey?.let { seriesKey -> dao.updateWatchProgress(seriesKey, effectivePos, dur.coerceAtLeast(0L), now) }
             } else if (st != null && st.sectionType != AetherSectionType.LIVE) {
-                dao.updateWatchProgress(
-                    uniqueStreamKey = st.uniqueStreamKey,
-                    positionMs = effectivePos,
-                    durationMs = dur.coerceAtLeast(0L),
-                    watchedAt = now
-                )
+                dao.updateWatchProgress(st.uniqueStreamKey, effectivePos, dur.coerceAtLeast(0L), now)
             }
         }
     }
@@ -324,12 +276,7 @@ fun AetherApp(
     }
 
     AetherTheme {
-        // Root Box Container anchoring Z-Layer 0 (Cockpit), Z-Layer 40 (Modals), and Z-Layer 60f (340.dp Settings Overlay)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .focusRequester(cockpitRootFocusRequester)
-        ) {
+        Box(modifier = Modifier.fillMaxSize().focusRequester(cockpitRootFocusRequester)) {
             when (navState.currentScreen) {
                 is AetherScreen.GatekeeperLock -> {
                     GatekeeperLockScreen(
@@ -364,9 +311,7 @@ fun AetherApp(
                                 navigationViewModel.navigateTo(AetherScreen.LiveTv)
                             }
                         },
-                        onCancelIfPlaylistExists = if (activePlaylist != null) {
-                            { navigationViewModel.navigateTo(AetherScreen.LiveTv) }
-                        } else null
+                        onCancelIfPlaylistExists = if (activePlaylist != null) { { navigationViewModel.navigateTo(AetherScreen.LiveTv) } } else null
                     )
                 }
 
@@ -380,7 +325,7 @@ fun AetherApp(
                         selectedCategoryKey = selectedCategoryKey,
                         streamsInCategory = streamsInSelectedCategory,
                         currentPlayingStream = currentPlayingStream,
-                        currentChannelEpg = emptyList(),
+                        currentChannelEpg = activeChannelEpgList,
                         activeSection = selectedSection,
                         startInPureFullscreen = isCinemaPlayerActive,
                         isVodOrSeriesMode = selectedSection != AetherSectionType.LIVE,
@@ -412,29 +357,17 @@ fun AetherApp(
                                 }
                             }
                         },
-                        onOpenSeriesCockpit = { seriesItem ->
-                            activeSeriesForModal = seriesItem
-                        },
+                        onOpenSeriesCockpit = { seriesItem -> activeSeriesForModal = seriesItem },
                         onQuickFavoriteToggle = { stream ->
-                            scope.launch(Dispatchers.IO) {
-                                dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite)
-                            }
+                            scope.launch(Dispatchers.IO) { dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite) }
                         },
-                        onOpenFavoriteFolderDialog = { stream ->
-                            folderDialogTargetStream = stream
-                        },
+                        onOpenFavoriteFolderDialog = { stream -> folderDialogTargetStream = stream },
                         onOpenSettings = {
-                            val origin = if (isCinemaPlayerActive) {
-                                AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL
-                            } else {
-                                AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL
-                            }
+                            val origin = if (isCinemaPlayerActive) AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL else AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL
                             AetherSettingsStore.openDrawer(origin)
                             isSettingsModalVisible = true
                         },
-                        onOpenSearch = {
-                            isSearchModalVisible = true
-                        },
+                        onOpenSearch = { isSearchModalVisible = true },
                         onToggleLayoutMode = navigationViewModel::toggleLiveTvLayoutMode,
                         onCycleBufferPreset = {
                             val presets = StreamBufferPreset.entries
@@ -445,11 +378,8 @@ fun AetherApp(
                         },
                         onZapChannelOffset = { offset ->
                             if (!isCinemaPlayerActive && streamsInSelectedCategory.isNotEmpty()) {
-                                val currentIndex = streamsInSelectedCategory.indexOfFirst {
-                                    it.uniqueStreamKey == currentPlayingStream?.uniqueStreamKey
-                                }.coerceAtLeast(0)
-                                val targetIndex = (currentIndex + offset + streamsInSelectedCategory.size) %
-                                    streamsInSelectedCategory.size
+                                val currentIndex = streamsInSelectedCategory.indexOfFirst { it.uniqueStreamKey == currentPlayingStream?.uniqueStreamKey }.coerceAtLeast(0)
+                                val targetIndex = (currentIndex + offset + streamsInSelectedCategory.size) % streamsInSelectedCategory.size
                                 val nextChannel = streamsInSelectedCategory[targetIndex]
                                 currentPlayingStream = nextChannel
                                 playerEngine.playStream(nextChannel.streamUrl, 0L)
@@ -457,9 +387,7 @@ fun AetherApp(
                         },
                         onBackToDashboard = {
                             scope.launch {
-                                if (isCinemaPlayerActive) {
-                                    persistVodOrSeriesCheckpoint()
-                                }
+                                if (isCinemaPlayerActive) persistVodOrSeriesCheckpoint()
                                 isCinemaPlayerActive = false
                             }
                         }
@@ -482,15 +410,8 @@ fun AetherApp(
                         isCinemaPlayerActive = true
                         currentPlayingEpisode = episode
                         activeParentSeriesKey = parentSeries.uniqueStreamKey
-                        val displayTitle = if (episode.title.contains(parentSeries.name, ignoreCase = true)) {
-                            episode.title
-                        } else {
-                            "${parentSeries.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
-                        }
-                        currentPlayingStream = parentSeries.copy(
-                            name = displayTitle,
-                            streamUrl = episode.streamUrl
-                        )
+                        val displayTitle = if (episode.title.contains(parentSeries.name, ignoreCase = true)) episode.title else "${parentSeries.name} • S${episode.seasonNumber}E${episode.episodeNumber} - ${episode.title}"
+                        currentPlayingStream = parentSeries.copy(name = displayTitle, streamUrl = episode.streamUrl)
                         val startPos = if (resume) episode.resumePositionMs.coerceAtLeast(0L) else 0L
                         playerEngine.playStream(episode.streamUrl, startPos)
 
@@ -515,9 +436,7 @@ fun AetherApp(
                     onSelectStream = { stream ->
                         isSearchModalVisible = false
                         when (stream.sectionType) {
-                            AetherSectionType.SERIES -> {
-                                activeSeriesForModal = stream
-                            }
+                            AetherSectionType.SERIES -> activeSeriesForModal = stream
                             AetherSectionType.VOD -> {
                                 currentPlayingEpisode = null
                                 activeParentSeriesKey = null
@@ -526,12 +445,7 @@ fun AetherApp(
                                 val startPos = stream.resumePositionMs.coerceAtLeast(0L)
                                 playerEngine.playStream(stream.streamUrl, startPos)
                                 scope.launch(Dispatchers.IO) {
-                                    dao.updateWatchProgress(
-                                        uniqueStreamKey = stream.uniqueStreamKey,
-                                        positionMs = startPos,
-                                        durationMs = stream.totalDurationMs.coerceAtLeast(0L),
-                                        watchedAt = Clock.System.now().toEpochMilliseconds()
-                                    )
+                                    dao.updateWatchProgress(stream.uniqueStreamKey, startPos, stream.totalDurationMs.coerceAtLeast(0L), Clock.System.now().toEpochMilliseconds())
                                 }
                             }
                             AetherSectionType.LIVE -> {
@@ -558,55 +472,29 @@ fun AetherApp(
                     streamItem = targetStream,
                     folders = favoriteFolders,
                     onToggleQuickFavorite = { stream ->
-                        scope.launch(Dispatchers.IO) {
-                            dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite)
-                        }
+                        scope.launch(Dispatchers.IO) { dao.setQuickFavorite(stream.uniqueStreamKey, !stream.isQuickFavorite) }
                     },
                     onAssignToFolder = { folderId, stream ->
                         scope.launch(Dispatchers.IO) {
-                            dao.addStreamToFavoriteFolder(
-                                FavoriteFolderMappingEntity(
-                                    folderId = folderId,
-                                    uniqueStreamKey = stream.uniqueStreamKey,
-                                    addedEpochMillis = Clock.System.now().toEpochMilliseconds()
-                                )
-                            )
+                            dao.addStreamToFavoriteFolder(FavoriteFolderMappingEntity(folderId, stream.uniqueStreamKey, Clock.System.now().toEpochMilliseconds()))
                         }
                     },
                     onCreateNewFolder = { folderName, stream ->
                         scope.launch(Dispatchers.IO) {
-                            val newFolderId = dao.createFavoriteFolder(
-                                FavoriteFolderEntity(
-                                    playlistId = playlistId,
-                                    folderName = folderName
-                                )
-                            )
-                            dao.addStreamToFavoriteFolder(
-                                FavoriteFolderMappingEntity(
-                                    folderId = newFolderId,
-                                    uniqueStreamKey = stream.uniqueStreamKey,
-                                    addedEpochMillis = Clock.System.now().toEpochMilliseconds()
-                                )
-                            )
+                            val newFolderId = dao.createFavoriteFolder(FavoriteFolderEntity(playlistId = playlistId, folderName = folderName))
+                            dao.addStreamToFavoriteFolder(FavoriteFolderMappingEntity(newFolderId, stream.uniqueStreamKey, Clock.System.now().toEpochMilliseconds()))
                         }
                     },
                     onDismiss = { folderDialogTargetStream = null }
                 )
             }
 
-            // Z-Layer 60f: TiviMate 340.dp Right-Aligned Settings Drawer Overlay (Blueprints 1-12)
             AetherSettingsOverlay(
                 isVisible = isSettingsModalVisible,
-                focusOrigin = if (isCinemaPlayerActive) {
-                    AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL
-                } else {
-                    AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL
-                },
+                focusOrigin = if (isCinemaPlayerActive) AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL else AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL,
                 navRailFocusRequester = cockpitRootFocusRequester,
                 hudCarouselFocusRequester = hudSettingsReturnFocusRequester,
-                onDismiss = {
-                    isSettingsModalVisible = false
-                },
+                onDismiss = { isSettingsModalVisible = false },
                 onAddPlaylistRequested = {
                     isSettingsModalVisible = false
                     navigationViewModel.navigateTo(AetherScreen.PlaylistSetup)
@@ -617,9 +505,19 @@ fun AetherApp(
                 },
                 onRefreshEpgRequested = {
                     dashboardViewModel.triggerManualSync()
+                    currentPlayingStream?.let { activeStream ->
+                        if (activeStream.sectionType == AetherSectionType.LIVE) {
+                            scope.launch(Dispatchers.IO) {
+                                val refreshed = runCatching { dashboardViewModel.fetchShortEpgForChannelOnDemand(activeStream) }.getOrDefault(emptyList())
+                                if (refreshed.isNotEmpty()) activeChannelEpgList = refreshed
+                            }
+                        }
+                    }
                 },
                 onClearEpgRequested = {
                     fetchedCategoryKeys.clear()
+                    activeChannelEpgList = emptyList()
+                    dashboardViewModel.clearEpgCacheNow()
                 },
                 onBufferPresetChanged = { presetLabel ->
                     val availablePresets = StreamBufferPreset.entries
@@ -653,15 +551,11 @@ private fun AetherSeriesDetailModal(
     var selectedSeason by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(seriesItem.uniqueStreamKey) {
-        val existingSeasons = withContext(Dispatchers.IO) {
-            dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
-        }
+        val existingSeasons = withContext(Dispatchers.IO) { dao.getAvailableSeasons(seriesItem.uniqueStreamKey) }
         if (existingSeasons.isEmpty()) {
             isLoadingEpisodes = true
             onFetchEpisodes()
-            val updatedSeasons = withContext(Dispatchers.IO) {
-                dao.getAvailableSeasons(seriesItem.uniqueStreamKey)
-            }
+            val updatedSeasons = withContext(Dispatchers.IO) { dao.getAvailableSeasons(seriesItem.uniqueStreamKey) }
             availableSeasons = updatedSeasons
             selectedSeason = updatedSeasons.firstOrNull()
             isLoadingEpisodes = false
@@ -673,14 +567,10 @@ private fun AetherSeriesDetailModal(
 
     val episodesForSeason by remember(seriesItem.uniqueStreamKey, selectedSeason) {
         val season = selectedSeason
-        if (season != null) dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season)
-        else flowOf(emptyList())
+        if (season != null) dao.observeEpisodesForSeason(seriesItem.uniqueStreamKey, season) else flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(
             modifier = Modifier
                 .width(1080.dp)
@@ -693,32 +583,14 @@ private fun AetherSeriesDetailModal(
             Row(horizontalArrangement = Arrangement.spacedBy(24.dp), modifier = Modifier.fillMaxSize()) {
                 Column(modifier = Modifier.width(320.dp).fillMaxHeight(), verticalArrangement = Arrangement.SpaceBetween) {
                     Column {
-                        Text(
-                            text = seriesItem.name,
-                            style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan, fontWeight = FontWeight.Bold),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Text(seriesItem.name, style = MaterialTheme.typography.headlineMedium.copy(color = AetherColors.CyberCyan, fontWeight = FontWeight.Bold), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (!seriesItem.rating.isNullOrBlank()) "⭐ ${seriesItem.rating}" else "HD Serie",
-                            style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue)
-                        )
+                        Text(if (!seriesItem.rating.isNullOrBlank()) "⭐ ${seriesItem.rating}" else "HD Serie", style = MaterialTheme.typography.labelSmall.copy(color = AetherColors.IceBlue))
                         Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = seriesItem.plotDescription ?: "Keine Inhaltsangabe verfügbar.",
-                            style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary),
-                            maxLines = 8,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Text(seriesItem.plotDescription ?: "Keine Inhaltsangabe verfügbar.", style = MaterialTheme.typography.bodyMedium.copy(color = AetherColors.TextSecondary), maxLines = 8, overflow = TextOverflow.Ellipsis)
                     }
-
                     AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 10.dp) {
-                        Text(
-                            text = "SCHLIESSEN ✕",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                        )
+                        Text("SCHLIESSEN ✕", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold), modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
                     }
                 }
 
@@ -739,83 +611,46 @@ private fun AetherSeriesDetailModal(
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                             items(availableSeasons, key = { it }) { seasonNum ->
                                 val isSelected = selectedSeason == seasonNum
-                                AetherFocusableGlassCard(
-                                    onClick = { selectedSeason = seasonNum },
-                                    isSelected = isSelected,
-                                    cornerRadius = 8.dp
-                                ) {
+                                AetherFocusableGlassCard(onClick = { selectedSeason = seasonNum }, isSelected = isSelected, cornerRadius = 8.dp) {
                                     Text(
                                         text = "Staffel $seasonNum",
-                                        style = MaterialTheme.typography.titleMedium.copy(
-                                            color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary,
-                                            fontWeight = FontWeight.Bold
-                                        ),
+                                        style = MaterialTheme.typography.titleMedium.copy(color = if (isSelected) AetherColors.CyberCyan else AetherColors.TextPrimary, fontWeight = FontWeight.Bold),
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
                                 }
                             }
                         }
-
                         Spacer(modifier = Modifier.height(14.dp))
-
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
                             items(episodesForSeason, key = { it.uniqueEpisodeKey }) { ep ->
                                 val hasResume = ep.resumePositionMs > 10_000L
-                                AetherFocusableGlassCard(
-                                    onClick = { onPlayEpisode(ep, hasResume) },
-                                    cornerRadius = 10.dp,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) { isFocused ->
-                                    Row(
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth().padding(12.dp)
-                                    ) {
+                                AetherFocusableGlassCard(onClick = { onPlayEpisode(ep, hasResume) }, cornerRadius = 10.dp, modifier = Modifier.fillMaxWidth()) { isFocused ->
+                                    Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = "Folge ${ep.episodeNumber}: ${ep.title}",
-                                                style = MaterialTheme.typography.titleMedium.copy(
-                                                    color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary,
-                                                    fontWeight = FontWeight.Bold
-                                                ),
+                                                style = MaterialTheme.typography.titleMedium.copy(color = if (isFocused) AetherColors.CyberCyan else AetherColors.TextPrimary, fontWeight = FontWeight.Bold),
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             if (!ep.plotDescription.isNullOrBlank()) {
                                                 Spacer(modifier = Modifier.height(4.dp))
-                                                Text(
-                                                    text = ep.plotDescription,
-                                                    style = MaterialTheme.typography.bodySmall.copy(color = AetherColors.TextSecondary),
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
+                                                Text(ep.plotDescription, style = MaterialTheme.typography.bodySmall.copy(color = AetherColors.TextSecondary), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             }
                                             if (ep.resumePositionMs > 0L && ep.durationMs > 0L) {
                                                 Spacer(modifier = Modifier.height(4.dp))
                                                 val progress = (ep.resumePositionMs.toFloat() / ep.durationMs.toFloat()).coerceIn(0.05f, 1f)
-                                                LinearProgressIndicator(
-                                                    progress = { progress },
-                                                    color = AetherColors.CyberCyan,
-                                                    trackColor = AetherColors.DeepSpaceNavy,
-                                                    modifier = Modifier.fillMaxWidth(0.5f).height(4.dp).clip(RoundedCornerShape(2.dp))
-                                                )
+                                                LinearProgressIndicator(progress = { progress }, color = AetherColors.CyberCyan, trackColor = AetherColors.DeepSpaceNavy, modifier = Modifier.fillMaxWidth(0.5f).height(4.dp).clip(RoundedCornerShape(2.dp)))
                                             }
                                         }
-
                                         Spacer(modifier = Modifier.width(16.dp))
-
                                         Box(
                                             modifier = Modifier
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(if (hasResume) AetherColors.NeonEmerald.copy(alpha = 0.2f) else AetherColors.CyberCyan.copy(alpha = 0.2f))
                                                 .padding(horizontal = 10.dp, vertical = 6.dp)
                                         ) {
-                                            Text(
-                                                text = if (hasResume) "▶ Fortsetzen" else "▶ Abspielen",
-                                                color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
+                                            Text(if (hasResume) "▶ Fortsetzen" else "▶ Abspielen", color = if (hasResume) AetherColors.NeonEmerald else AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                         }
                                     }
                                 }
@@ -839,21 +674,11 @@ private fun AetherGlobalSearchModal(
     var debouncedQuery by remember { mutableStateOf("") }
 
     val firstKeyFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        runCatching { firstKeyFocusRequester.requestFocus() }
-    }
-
-    LaunchedEffect(queryText) {
-        delay(280L)
-        debouncedQuery = queryText.trim()
-    }
+    LaunchedEffect(Unit) { runCatching { firstKeyFocusRequester.requestFocus() } }
+    LaunchedEffect(queryText) { delay(280L); debouncedQuery = queryText.trim() }
 
     val searchResults by remember(playlistId, debouncedQuery) {
-        if (playlistId <= 0L || debouncedQuery.length < 2) {
-            flowOf(emptyList())
-        } else {
-            dao.searchVisibleStreams(playlistId, debouncedQuery)
-        }
+        if (playlistId <= 0L || debouncedQuery.length < 2) flowOf(emptyList()) else dao.searchVisibleStreams(playlistId, debouncedQuery)
     }.collectAsState(initial = emptyList())
 
     val quickKeys = remember {
@@ -864,10 +689,7 @@ private fun AetherGlobalSearchModal(
         )
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(
             modifier = Modifier
                 .width(1020.dp)
@@ -878,26 +700,10 @@ private fun AetherGlobalSearchModal(
                 .padding(24.dp)
         ) {
             Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "🔍 GLOBALE SUCHE (LIVE TV, FILME & SERIEN)",
-                        color = AetherColors.CyberCyan,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("🔍 GLOBALE SUCHE (LIVE TV, FILME & SERIEN)", color = AetherColors.CyberCyan, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
                     AetherFocusableGlassCard(onClick = onDismiss, cornerRadius = 8.dp) {
-                        Text(
-                            text = "SCHLIESSEN ✕",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
+                        Text("SCHLIESSEN ✕", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
                 }
 
@@ -915,10 +721,7 @@ private fun AetherGlobalSearchModal(
                     )
                 )
 
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                     items(quickKeys.size) { idx ->
                         val keyLabel = quickKeys[idx]
                         val keyMod = if (idx == 0) Modifier.focusRequester(firstKeyFocusRequester) else Modifier
@@ -934,13 +737,7 @@ private fun AetherGlobalSearchModal(
                             cornerRadius = 6.dp,
                             modifier = keyMod
                         ) { isFocused ->
-                            Text(
-                                text = keyLabel,
-                                color = if (isFocused) AetherColors.CyberCyan else Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
-                            )
+                            Text(keyLabel, color = if (isFocused) AetherColors.CyberCyan else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
                         }
                     }
                 }
@@ -960,40 +757,19 @@ private fun AetherGlobalSearchModal(
                         else -> {
                             LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 items(searchResults, key = { it.uniqueStreamKey }) { item ->
-                                    AetherFocusableGlassCard(
-                                        onClick = { onSelectStream(item) },
-                                        cornerRadius = 8.dp,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) { isFocused ->
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
+                                    AetherFocusableGlassCard(onClick = { onSelectStream(item) }, cornerRadius = 8.dp, modifier = Modifier.fillMaxWidth()) { isFocused ->
+                                        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                                                 val (tag, tagColor) = when (item.sectionType) {
                                                     AetherSectionType.LIVE -> "TV" to AetherColors.CyberCyan
                                                     AetherSectionType.VOD -> "FILM" to AetherColors.NeonEmerald
                                                     AetherSectionType.SERIES -> "SERIE" to AetherColors.LaserAmber
                                                 }
-                                                Box(
-                                                    modifier = Modifier
-                                                        .clip(RoundedCornerShape(4.dp))
-                                                        .background(tagColor.copy(alpha = 0.2f))
-                                                        .border(1.dp, tagColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                                ) {
+                                                Box(modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(tagColor.copy(alpha = 0.2f)).border(1.dp, tagColor.copy(alpha = 0.5f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                                     Text(tag, color = tagColor, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
                                                 }
                                                 Spacer(modifier = Modifier.width(10.dp))
-                                                Text(
-                                                    text = item.name,
-                                                    color = if (isFocused) Color.White else AetherColors.TextPrimary,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
+                                                Text(item.name, color = if (isFocused) Color.White else AetherColors.TextPrimary, fontSize = 14.sp, fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             }
                                             Text("▶ Starten", color = AetherColors.CyberCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                         }
