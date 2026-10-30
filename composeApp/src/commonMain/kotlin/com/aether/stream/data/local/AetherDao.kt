@@ -148,6 +148,19 @@ interface AetherDao {
     @Query("DELETE FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey")
     suspend fun deleteEpisodesForSeries(seriesStreamKey: String)
 
+    // ==========================================
+    // MODUL 2 & 3: EPG FUZZY-SEARCH & STREAM AUTO-MEMORY
+    // ==========================================
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertStreamSettings(settings: StreamSettingsEntity)
+
+    @Query("SELECT * FROM stream_settings WHERE uniqueStreamKey = :uniqueStreamKey LIMIT 1")
+    suspend fun getStreamSettings(uniqueStreamKey: String): StreamSettingsEntity?
+
+    @Query("SELECT * FROM stream_settings WHERE uniqueStreamKey = :uniqueStreamKey LIMIT 1")
+    fun observeStreamSettings(uniqueStreamKey: String): Flow<StreamSettingsEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEpgProgramsChunk(programs: List<EpgProgramEntity>)
 
@@ -162,6 +175,12 @@ interface AetherDao {
 
     @Query("SELECT * FROM epg_programs WHERE epgChannelId = :epgChannelId AND endEpochMillis > :windowStartMs AND startEpochMillis < :windowEndMs ORDER BY startEpochMillis ASC LIMIT 40")
     suspend fun getEpgForChannelInWindow(epgChannelId: String, windowStartMs: Long, windowEndMs: Long): List<EpgProgramEntity>
+
+    @Query("SELECT * FROM epg_programs WHERE normalizedChannelName = :normalizedName AND endEpochMillis > :windowStartMs AND startEpochMillis < :windowEndMs ORDER BY startEpochMillis ASC LIMIT 40")
+    suspend fun getEpgByNormalizedNameInWindow(normalizedName: String, windowStartMs: Long, windowEndMs: Long): List<EpgProgramEntity>
+
+    @Query("SELECT DISTINCT epgChannelId FROM epg_programs LIMIT 5000")
+    suspend fun getAllDistinctEpgChannelIds(): List<String>
 
     @Query("SELECT * FROM epg_programs WHERE epgChannelId IN (:epgChannelIds) AND endEpochMillis > :windowStartMs AND startEpochMillis < :windowEndMs ORDER BY epgChannelId ASC, startEpochMillis ASC")
     suspend fun getEpgForChannelsBatchInWindow(epgChannelIds: List<String>, windowStartMs: Long, windowEndMs: Long): List<EpgProgramEntity>
@@ -184,12 +203,13 @@ interface AetherDao {
         PlaylistEntity::class,
         CategoryEntity::class,
         StreamItemEntity::class,
+        StreamSettingsEntity::class,
         FavoriteFolderEntity::class,
         FavoriteFolderMappingEntity::class,
         EpgProgramEntity::class,
         SeriesEpisodeEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @ConstructedBy(AetherDatabaseConstructor::class)
