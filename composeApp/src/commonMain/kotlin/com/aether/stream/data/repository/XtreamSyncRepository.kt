@@ -14,6 +14,8 @@ import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.yield
@@ -105,6 +107,84 @@ private fun JsonElement?.asCleanLong(default: Long = 0L): Long =
         ?: (this as? JsonPrimitive)?.contentOrNull?.trim()?.toLongOrNull()
         ?: default
 
+/**
+ * MODUL 2: Hochperformante EPG Fuzzy-String Matching & Levenshtein-Distanz-Engine.
+ */
+object AetherEpgFuzzyMatcher {
+    private val prefixCountryRegex = Regex("^(\\|?[a-z]{2,3}\\|?\\s*[-|:]?\\s*)", RegexOption.IGNORE_CASE)
+    private val stripTagsRegex = Regex(
+        "\\b(de|at|ch|uk|us|tr|pl|fr|es|it|nl|fhd|uhd|4k|8k|hd|sd|hevc|h265|h264|1080p|1080i|720p|50fps|60fps|raw|gold|vip|backup|low|ger|germany)\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val nonAlphaNumRegex = Regex("[^a-z0-9]")
+    private val digitsRegex = Regex("\\d+")
+
+    fun normalizeChannelStem(rawName: String?): String {
+        if (rawName.isNullOrBlank()) return ""
+        val withoutPrefix = rawName.trim().replace(prefixCountryRegex, "")
+        val withoutTags = withoutPrefix.replace(stripTagsRegex, " ")
+        return withoutTags.lowercase().replace(nonAlphaNumRegex, "")
+    }
+
+    fun extractNumericSignature(rawName: String?): String {
+        if (rawName.isNullOrBlank()) return ""
+        val withoutTechNumbers = rawName.replace(Regex("\\b(1080p|1080i|720p|50fps|60fps|4k|8k|h264|h265|24/7)\\b", RegexOption.IGNORE_CASE), "")
+        return digitsRegex.findAll(withoutTechNumbers).joinToString("_") { it.value }
+    }
+
+    fun computeLevenshteinSimilarity(stemA: String, stemB: String): Float {
+        if (stemA.isEmpty() || stemB.isEmpty()) return 0f
+        if (stemA == stemB) return 1.0f
+        val lenA = stemA.length
+        val lenB = stemB.length
+        val maxLen = max(lenA, lenB)
+        if (kotlin.math.abs(lenA - lenB).toFloat() / maxLen.toFloat() > 0.35f) return 0f
+
+        var prevRow = IntArray(lenB + 1) { it }
+        var currRow = IntArray(lenB + 1)
+
+        for (i in 1..lenA) {
+            currRow[0] = i
+            val chA = stemA[i - 1]
+            for (j in 1..lenB) {
+                val cost = if (chA == stemB[j - 1]) 0 else 1
+                currRow[j] = min(min(currRow[j - 1] + 1, prevRow[j] + 1), prevRow[j - 1] + cost)
+            }
+            val tmp = prevRow
+            prevRow = currRow
+            currRow = tmp
+        }
+        val distance = prevRow[lenB]
+        return (1.0f - (distance.toFloat() / maxLen.toFloat())).coerceIn(0f, 1f)
+    }
+
+    fun findBestFuzzyMatch(targetChannelName: String, candidateEpgIds: List<String>, minScore: Float = 0.80f): String? {
+        val targetStem = normalizeChannelStem(targetChannelName)
+        if (targetStem.length < 2) return null
+        val targetNumbers = extractNumericSignature(targetChannelName)
+
+        var bestCandidate: String? = null
+        var bestScore = minScore
+
+        for (candidate in candidateEpgIds) {
+            val candNumbers = extractNumericSignature(candidate)
+            // Numerische Token-Sperre: "Sky Sport 1" darf niemals auf "Sky Sport 2" matchen
+            if (targetNumbers.isNotEmpty() && candNumbers.isNotEmpty() && targetNumbers != candNumbers) continue
+
+            val candStem = normalizeChannelStem(candidate)
+            if (candStem.isEmpty()) continue
+            if (candStem == targetStem) return candidate
+
+            val score = computeLevenshteinSimilarity(targetStem, candStem)
+            if (score > bestScore) {
+                bestScore = score
+                bestCandidate = candidate
+            }
+        }
+        return bestCandidate
+    }
+}
+
 class XtreamSyncRepository(
     private val dao: AetherDao,
     private val httpClient: HttpClient
@@ -130,26 +210,17 @@ class XtreamSyncRepository(
             if (!it.startsWith("http://") && !it.startsWith("https://")) "http://$it" else it
         }.trimEnd('/')
 
-    /**
-     * L10 Sanitizer: Bereinigt Steuerzeichen, kaputte UTF-8-Surrogate und ungeschlossene Quotes in Stream-Namen.
-     */
     private fun sanitizeStreamText(raw: String?, fallback: String): String {
         if (raw.isNullOrBlank()) return fallback
         val sb = StringBuilder(raw.length)
         for (ch in raw) {
             val code = ch.code
-            if (code >= 32 && code != 0xFFFD && !ch.isSurrogate()) {
-                sb.append(ch)
-            } else if (ch == '\t' || ch == '\n') {
-                sb.append(' ')
-            }
+            if (code >= 32 && code != 0xFFFD && !ch.isSurrogate()) sb.append(ch)
+            else if (ch == '\t' || ch == '\n') sb.append(' ')
         }
         return sb.toString().trim().ifEmpty { fallback }
     }
 
-    /**
-     * L10 Raw Payload Sanitizer: Schneidet führenden PHP/HTML-Müll vor '['/'{' ab und filtert ASCII-Control-Chars.
-     */
     private fun sanitizeRawJsonPayload(raw: String): String {
         val trimmed = raw.trim().removePrefix("\uFEFF")
         if (trimmed.isEmpty()) return ""
@@ -161,18 +232,11 @@ class XtreamSyncRepository(
         val sb = StringBuilder(sliced.length)
         for (ch in sliced) {
             val c = ch.code
-            if (c >= 32 || ch == '\n' || ch == '\r' || ch == '\t') {
-                sb.append(ch)
-            }
+            if (c >= 32 || ch == '\n' || ch == '\r' || ch == '\t') sb.append(ch)
         }
         return sb.toString()
     }
 
-    /**
-     * L10 Fault-Isolated JSON Array/Map Decoder mit Bracket-Depth Object Recovery:
-     * Selbst wenn ein 50.000-Zeilen-Payload mitten im Stream ein unescaped Quote enthält,
-     * rettet der Bracket-Scanner alle intakten JSON-Objekte einzeln (0 Chunk-Drops).
-     */
     private inline fun <reified T> decodeListResiliently(rawPayload: String): List<T> {
         val cleanPayload = sanitizeRawJsonPayload(rawPayload)
         if (cleanPayload.isEmpty()) return emptyList()
@@ -182,26 +246,13 @@ class XtreamSyncRepository(
 
         if (fastParsed != null) {
             when (fastParsed) {
-                is JsonArray -> {
-                    for (item in fastParsed) {
-                        if (item is JsonObject) {
-                            runCatching { resultList.add(jsonParser.decodeFromJsonElement<T>(item)) }
-                        }
-                    }
-                }
-                is JsonObject -> {
-                    for ((_, item) in fastParsed) {
-                        if (item is JsonObject) {
-                            runCatching { resultList.add(jsonParser.decodeFromJsonElement<T>(item)) }
-                        }
-                    }
-                }
+                is JsonArray -> for (item in fastParsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement<T>(item)) }
+                is JsonObject -> for ((_, item) in fastParsed) if (item is JsonObject) runCatching { resultList.add(jsonParser.decodeFromJsonElement<T>(item)) }
                 else -> Unit
             }
             return resultList
         }
 
-        // Fallback Bracket-Depth Object Recovery für korrupte JSON-Streams
         var depth = 0
         var inString = false
         var isEscaped = false
@@ -209,18 +260,9 @@ class XtreamSyncRepository(
 
         for (i in cleanPayload.indices) {
             val ch = cleanPayload[i]
-            if (isEscaped) {
-                isEscaped = false
-                continue
-            }
-            if (ch == '\\' && inString) {
-                isEscaped = true
-                continue
-            }
-            if (ch == '"') {
-                inString = !inString
-                continue
-            }
+            if (isEscaped) { isEscaped = false; continue }
+            if (ch == '\\' && inString) { isEscaped = true; continue }
+            if (ch == '"') { inString = !inString; continue }
             if (!inString) {
                 if (ch == '{') {
                     if (depth == 0) objStartIdx = i
@@ -229,13 +271,10 @@ class XtreamSyncRepository(
                     depth -= 1
                     if (depth == 0 && objStartIdx >= 0) {
                         val singleObjSlice = cleanPayload.substring(objStartIdx, i + 1)
-                        runCatching {
-                            resultList.add(jsonParser.decodeFromString<T>(singleObjSlice))
-                        }
+                        runCatching { resultList.add(jsonParser.decodeFromString<T>(singleObjSlice)) }
                         objStartIdx = -1
                     } else if (depth < 0) {
-                        depth = 0
-                        objStartIdx = -1
+                        depth = 0; objStartIdx = -1
                     }
                 }
             }
@@ -313,7 +352,6 @@ class XtreamSyncRepository(
             return key
         }
 
-        // 1. KATEGORIEN LADEN (Live, VOD & Serien)
         val liveCategories = mutableListOf<CategoryEntity>()
         fetchCategories(apiEndpoint, playlist, "get_live_categories").forEachIndexed { idx, dto ->
             val cId = dto.categoryId.asCleanString(ORPHAN_CATEGORY_ID)
@@ -338,7 +376,6 @@ class XtreamSyncRepository(
         }
         if (seriesCategories.isNotEmpty()) dao.insertNewCategoriesIgnoringExisting(seriesCategories)
 
-        // 2. LIVE-TV STREAMS LADEN (Inkl. Orphan Catch-Net "aether_orphan_catch" & 2.500er Batching)
         val liveStreams = ArrayList<StreamItemEntity>(4096)
         val orphanLiveCats = mutableListOf<CategoryEntity>()
         fetchLiveStreams(apiEndpoint, playlist).forEachIndexed { idx, dto ->
@@ -353,6 +390,7 @@ class XtreamSyncRepository(
                 }
                 val cleanName = sanitizeStreamText(dto.name, "Kanal #$sId")
                 val compositeKey = buildCompositeStreamKey(playlist.id, AetherSectionType.LIVE, sId, finalCatKey, cleanName)
+                val normalizedEpgFallback = AetherEpgFuzzyMatcher.normalizeChannelStem(cleanName)
 
                 liveStreams.add(
                     StreamItemEntity(
@@ -364,7 +402,7 @@ class XtreamSyncRepository(
                         name = cleanName,
                         logoUrl = dto.streamIcon?.trim(),
                         streamUrl = "$cleanServer/live/${playlist.username}/${playlist.password}/$sId.ts",
-                        epgChannelId = dto.epgChannelId?.trim()?.takeIf { it.isNotBlank() } ?: compositeKey,
+                        epgChannelId = dto.epgChannelId?.trim()?.takeIf { it.isNotBlank() } ?: normalizedEpgFallback.ifEmpty { compositeKey },
                         containerExtension = "ts",
                         isVisible = true,
                         customChannelNumber = dto.num.asCleanInt(idx + 1)
@@ -380,7 +418,6 @@ class XtreamSyncRepository(
             }
         }
 
-        // 3. SERIEN LADEN (Inkl. Orphan Catch-Net "aether_orphan_catch" & 2.500er Batching)
         val seriesStreams = ArrayList<StreamItemEntity>(2048)
         val orphanSeriesCats = mutableListOf<CategoryEntity>()
         fetchSeries(apiEndpoint, playlist, null).forEachIndexed { idx, dto ->
@@ -426,56 +463,91 @@ class XtreamSyncRepository(
         newlyDiscoveredCount
     }
 
+    /**
+     * MODUL 2 + PHASE 3 EPG:
+     * 1. Prüft exakte epgChannelId in SQLite
+     * 2. Prüft B-Tree normalizedChannelName in SQLite
+     * 3. Führt Levenshtein-Fuzzy-Match gegen bekannte EPG-Kanäle aus
+     * 4. Lädt Xtream Short-EPG und speichert mit normalisiertem Kanalstamm
+     */
     suspend fun fetchAndStoreShortEpgForStream(
         playlist: PlaylistEntity,
         stream: StreamItemEntity,
         storeDescriptions: Boolean = true
     ): List<EpgProgramEntity> = withContext(Dispatchers.IO) {
-        if (stream.providerStreamId <= 0) return@withContext emptyList()
-        val cleanServer = normalizeServerUrl(playlist.serverUrl)
-        val apiEndpoint = "$cleanServer/player_api.php"
+        val nowMs = Clock.System.now().toEpochMilliseconds()
+        val windowStartMs = nowMs - 3_600_000L
+        val windowEndMs = nowMs + 21_600_000L
         val channelKey = stream.epgChannelId?.takeIf { it.isNotBlank() } ?: stream.uniqueStreamKey
+        val normalizedStem = AetherEpgFuzzyMatcher.normalizeChannelStem(stream.name)
 
-        val parsedPrograms = runCatching {
-            val raw = httpClient.get(apiEndpoint) {
-                header("User-Agent", IPTV_USER_AGENT)
-                parameter("username", playlist.username)
-                parameter("password", playlist.password)
-                parameter("action", "get_short_epg")
-                parameter("stream_id", stream.providerStreamId)
-                parameter("limit", 16)
-            }.body<String>()
+        if (stream.providerStreamId > 0) {
+            val cleanServer = normalizeServerUrl(playlist.serverUrl)
+            val apiEndpoint = "$cleanServer/player_api.php"
 
-            val cleanJson = sanitizeRawJsonPayload(raw)
-            if (!cleanJson.startsWith("{")) return@runCatching emptyList()
-            val rootObj = jsonParser.parseToJsonElement(cleanJson) as? JsonObject ?: return@runCatching emptyList()
-            val listings = rootObj["epg_listings"] as? JsonArray ?: return@runCatching emptyList()
+            val parsedPrograms = runCatching {
+                val raw = httpClient.get(apiEndpoint) {
+                    header("User-Agent", IPTV_USER_AGENT)
+                    parameter("username", playlist.username)
+                    parameter("password", playlist.password)
+                    parameter("action", "get_short_epg")
+                    parameter("stream_id", stream.providerStreamId)
+                    parameter("limit", 16)
+                }.body<String>()
 
-            listings.mapNotNull { elem ->
-                val obj = elem as? JsonObject ?: return@mapNotNull null
-                val dto = runCatching { jsonParser.decodeFromJsonElement<XtreamEpgListingDto>(obj) }.getOrNull() ?: return@mapNotNull null
-                val startSec = dto.startTimestamp.asCleanLong(0L)
-                val stopSec = dto.stopTimestamp.asCleanLong(0L)
-                if (startSec <= 0L || stopSec <= startSec) return@mapNotNull null
+                val cleanJson = sanitizeRawJsonPayload(raw)
+                if (!cleanJson.startsWith("{")) return@runCatching emptyList()
+                val rootObj = jsonParser.parseToJsonElement(cleanJson) as? JsonObject ?: return@runCatching emptyList()
+                val listings = rootObj["epg_listings"] as? JsonArray ?: return@runCatching emptyList()
 
-                val decodedTitle = sanitizeStreamText(decodeBase64OrPlain(dto.title), "Live Programm")
-                val decodedDesc = if (storeDescriptions) sanitizeStreamText(decodeBase64OrPlain(dto.description), "").takeIf { it.isNotBlank() } else null
+                listings.mapNotNull { elem ->
+                    val obj = elem as? JsonObject ?: return@mapNotNull null
+                    val dto = runCatching { jsonParser.decodeFromJsonElement<XtreamEpgListingDto>(obj) }.getOrNull() ?: return@mapNotNull null
+                    val startSec = dto.startTimestamp.asCleanLong(0L)
+                    val stopSec = dto.stopTimestamp.asCleanLong(0L)
+                    if (startSec <= 0L || stopSec <= startSec) return@mapNotNull null
 
-                EpgProgramEntity(
-                    epgChannelId = channelKey,
-                    title = decodedTitle,
-                    description = decodedDesc,
-                    startEpochMillis = startSec * 1000L,
-                    endEpochMillis = stopSec * 1000L
-                )
+                    val decodedTitle = sanitizeStreamText(decodeBase64OrPlain(dto.title), "Live Programm")
+                    val decodedDesc = if (storeDescriptions) sanitizeStreamText(decodeBase64OrPlain(dto.description), "").takeIf { it.isNotBlank() } else null
+
+                    EpgProgramEntity(
+                        epgChannelId = channelKey,
+                        title = decodedTitle,
+                        description = decodedDesc,
+                        startEpochMillis = startSec * 1000L,
+                        endEpochMillis = stopSec * 1000L,
+                        normalizedChannelName = normalizedStem
+                    )
+                }
+            }.getOrDefault(emptyList())
+
+            if (parsedPrograms.isNotEmpty()) {
+                dao.deleteEpgForChannel(channelKey)
+                dao.insertEpgProgramsInBatches(parsedPrograms)
+                return@withContext parsedPrograms
             }
-        }.getOrDefault(emptyList())
-
-        if (parsedPrograms.isNotEmpty()) {
-            dao.deleteEpgForChannel(channelKey)
-            dao.insertEpgProgramsInBatches(parsedPrograms)
         }
-        parsedPrograms
+
+        // Fallback Stufe 2: Direkte B-Tree Suche über normalisierten Kanalstamm
+        if (normalizedStem.isNotEmpty()) {
+            val byNormalized = runCatching {
+                dao.getEpgByNormalizedNameInWindow(normalizedStem, windowStartMs, windowEndMs)
+            }.getOrDefault(emptyList())
+            if (byNormalized.isNotEmpty()) return@withContext byNormalized
+        }
+
+        // Fallback Stufe 3: Levenshtein-Distanz Fuzzy-Matching gegen vorhandene EPG-Kanäle
+        val allEpgIds = runCatching { dao.getAllDistinctEpgChannelIds() }.getOrDefault(emptyList())
+        if (allEpgIds.isNotEmpty()) {
+            val matchedChannelId = AetherEpgFuzzyMatcher.findBestFuzzyMatch(stream.name, allEpgIds)
+            if (matchedChannelId != null) {
+                return@withContext runCatching {
+                    dao.getEpgForChannelInWindow(matchedChannelId, windowStartMs, windowEndMs)
+                }.getOrDefault(emptyList())
+            }
+        }
+
+        emptyList()
     }
 
     suspend fun pruneExpiredEpgAndGetChannelCount(pastDaysToKeep: Int = 7): Int = withContext(Dispatchers.IO) {
@@ -497,11 +569,7 @@ class XtreamSyncRepository(
     ): Boolean = withContext(Dispatchers.IO) {
         val cleanServer = normalizeServerUrl(playlist.serverUrl)
         val apiEndpoint = "$cleanServer/player_api.php"
-        val dtos = if (category.providerCategoryId == ORPHAN_CATEGORY_ID) {
-            fetchVodStreams(apiEndpoint, playlist, null)
-        } else {
-            fetchVodStreams(apiEndpoint, playlist, category.providerCategoryId)
-        }
+        val dtos = if (category.providerCategoryId == ORPHAN_CATEGORY_ID) fetchVodStreams(apiEndpoint, playlist, null) else fetchVodStreams(apiEndpoint, playlist, category.providerCategoryId)
         if (dtos.isEmpty()) return@withContext false
 
         val entities = dtos.mapIndexedNotNull { idx, dto ->
@@ -546,11 +614,7 @@ class XtreamSyncRepository(
     ): Boolean = withContext(Dispatchers.IO) {
         val cleanServer = normalizeServerUrl(playlist.serverUrl)
         val apiEndpoint = "$cleanServer/player_api.php"
-        val dtos = if (category.providerCategoryId == ORPHAN_CATEGORY_ID) {
-            fetchSeries(apiEndpoint, playlist, null)
-        } else {
-            fetchSeries(apiEndpoint, playlist, category.providerCategoryId)
-        }
+        val dtos = if (category.providerCategoryId == ORPHAN_CATEGORY_ID) fetchSeries(apiEndpoint, playlist, null) else fetchSeries(apiEndpoint, playlist, category.providerCategoryId)
         if (dtos.isEmpty()) return@withContext false
 
         val entities = dtos.mapIndexedNotNull { idx, dto ->
