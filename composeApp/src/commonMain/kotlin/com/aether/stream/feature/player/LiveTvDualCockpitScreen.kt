@@ -1348,7 +1348,36 @@ private fun DetailBadge(text: String, borderColor: Color, textColor: Color) {
         Text(text, color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
     }
 }
-private data class QuickHudActionItem(val icon: String, val label: String, val onActivate: () -> Unit)
+private object AetherPerStreamAudioDelayMatrix {
+    private val _delayMapFlow = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
+    val delayMapFlow: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _delayMapFlow
+
+    private var zeroBufferPtsInjector: ((streamKey: String, delayMs: Int, delayUs: Long) -> Unit)? = null
+
+    fun registerZeroBufferPtsInjector(injector: (streamKey: String, delayMs: Int, delayUs: Long) -> Unit) {
+        zeroBufferPtsInjector = injector
+    }
+
+    fun getDelayMs(streamKey: String): Int = _delayMapFlow.value[streamKey] ?: 0
+
+    fun applyStepWithAcceleration(streamKey: String, direction: Int, isAcceleratedHold: Boolean): Int {
+        val stepMs = if (isAcceleratedHold) 100 else 50
+        val currentMs = getDelayMs(streamKey)
+        val updatedMs = (currentMs + (direction * stepMs)).coerceIn(-5000, 5000)
+        setDelayMs(streamKey, updatedMs)
+        return updatedMs
+    }
+
+    fun setDelayMs(streamKey: String, delayMs: Int) {
+        val clamped = delayMs.coerceIn(-5000, 5000)
+        val currentMap = _delayMapFlow.value.toMutableMap()
+        currentMap[streamKey] = clamped
+        _delayMapFlow.value = currentMap
+        zeroBufferPtsInjector?.invoke(streamKey, clamped, clamped.toLong() * 1000L)
+    }
+}
+
+private data class QuickHudActionItem(val icon: String, val title: String, val statusLabel: String, val onActivate: () -> Unit)
 
 @Composable
 fun FullscreenPlayerHudOverlay(
@@ -1359,23 +1388,37 @@ fun FullscreenPlayerHudOverlay(
     onCyclePreset: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onZapChannelOffset: (Int) -> Unit,
-    onExitFullscreen: () -> Unit
+    onExitFullscreen: () -> Unit,
+    streamKey: String = streamTitle
 ) {
-    val currentPosMs by playerEngine.currentPositionMs.collectAsState()
-    val durationMs by playerEngine.durationMs.collectAsState()
     val isPlaying by playerEngine.isPlaying.collectAsState()
     val techMeta by playerEngine.techMetadata.collectAsState()
     val audioTracks by playerEngine.audioTracks.collectAsState()
     val subtitleTracks by playerEngine.subtitleTracks.collectAsState()
+    val perStreamDelayMap by AetherPerStreamAudioDelayMatrix.delayMapFlow.collectAsState()
     val clockSnapshot = rememberEpgTimelineClockSnapshot()
+
+    val effectiveStreamKey = remember(streamKey, streamTitle) { streamKey.ifBlank { streamTitle }.ifBlank { "DEFAULT_STREAM" } }
+    val currentStreamAudioDelayMs = remember(perStreamDelayMap, effectiveStreamKey) { perStreamDelayMap[effectiveStreamKey] ?: 0 }
+
+    // Reactive Zero-Buffering Injection when zapping between different IPTV channels
+    LaunchedEffect(effectiveStreamKey) {
+        val savedOffsetMs = AetherPerStreamAudioDelayMatrix.getDelayMs(effectiveStreamKey)
+        AetherPerStreamAudioDelayMatrix.setDelayMs(effectiveStreamKey, savedOffsetMs)
+    }
 
     var isHudVisible by remember { mutableStateOf(true) }
     var hudLayer by remember { mutableStateOf(HudOverlayLayer.TRANSPORT_BAR) }
+    var isAudioDelayTunerActive by remember { mutableStateOf(false) }
     var selectedTransportIdx by remember { mutableIntStateOf(2) }
     var selectedQuickIdx by remember { mutableIntStateOf(0) }
     var selectedDrawerIdx by remember { mutableIntStateOf(0) }
 
-    var audioDelayMs by remember { mutableIntStateOf(0) }
+    // D-Pad Repeat / Velocity Acceleration State for Index 4 (±50ms single click vs ±100ms hold)
+    var lastDelayKeyEpochMs by remember { mutableLongStateOf(0L) }
+    var lastDelayDirection by remember { mutableIntStateOf(0) }
+    var consecutiveHoldRepeats by remember { mutableIntStateOf(0) }
+
     var aspectModeIdx by remember { mutableIntStateOf(0) }
     var sleepTimerIdx by remember { mutableIntStateOf(0) }
     var selectedSubOverrideIdx by remember { mutableIntStateOf(-1) }
@@ -1390,7 +1433,14 @@ fun FullscreenPlayerHudOverlay(
     val activeAudioLabel = remember(audioTracks, selectedAudioOverrideIdx) {
         if (audioTracks.isNotEmpty()) {
             val chosen = audioTracks.getOrNull(selectedAudioOverrideIdx) ?: audioTracks.firstOrNull { it.isSelected } ?: audioTracks.first()
-            chosen.codecLabel.ifBlank { chosen.languageLabel.ifBlank { "Stereo" } }
+            val lang = chosen.languageLabel.trim()
+            val codec = chosen.codecLabel.trim()
+            when {
+                lang.isNotEmpty() && codec.isNotEmpty() -> "$lang ($codec)"
+                lang.isNotEmpty() -> lang
+                codec.isNotEmpty() -> codec
+                else -> "Stereo"
+            }
         } else "Stereo"
     }
     val subtitleDrawerOptions = remember(subtitleTracks) {
@@ -1412,33 +1462,61 @@ fun FullscreenPlayerHudOverlay(
             else -> "Aus"
         }
     }
-    val resolutionText = techMeta.resolutionLabel.ifBlank { "1280 × 720" }
-    val fpsText = techMeta.fpsLabel.ifBlank { "25 FPS" }
+    val resolutionText = techMeta.resolutionLabel.ifBlank { "1920 × 1080" }
+    val fpsText = techMeta.fpsLabel.ifBlank { "50 FPS" }
+    val formattedAudioDelay = remember(currentStreamAudioDelayMs) {
+        if (currentStreamAudioDelayMs > 0) "+$currentStreamAudioDelayMs ms" else "$currentStreamAudioDelayMs ms"
+    }
 
-    val quickActionItems = remember(resolutionText, activeAudioLabel, audioDelayMs, activeSubtitleLabel, aspectModeIdx, sleepTimerIdx, currentPreset) {
+    val quickActionItems = remember(resolutionText, activeAudioLabel, formattedAudioDelay, activeSubtitleLabel, aspectModeIdx, sleepTimerIdx, currentPreset) {
         listOf(
-            QuickHudActionItem("📺", "TV") { onExitFullscreen() },
-            QuickHudActionItem("🗔", "Bild in Bild") { onExitFullscreen() },
-            QuickHudActionItem("🎥", resolutionText) { onCyclePreset() },
-            QuickHudActionItem("🔊", activeAudioLabel) {
+            QuickHudActionItem("📺", "TV", "Guide") { onExitFullscreen() },
+            QuickHudActionItem("🗔", "Bild in Bild", "Mini-Player") { onExitFullscreen() },
+            QuickHudActionItem("🎥", "Auflösung", resolutionText.replace(" × ", "x")) { onCyclePreset() },
+            QuickHudActionItem("🔊", "Audio", activeAudioLabel) {
+                isAudioDelayTunerActive = false
                 selectedDrawerIdx = selectedAudioOverrideIdx.coerceIn(0, (audioDrawerOptions.size - 1).coerceAtLeast(0))
                 hudLayer = HudOverlayLayer.AUDIO_DRAWER
             },
-            QuickHudActionItem("↔", "$audioDelayMs ms") { audioDelayMs = when (audioDelayMs) { 0 -> 50; 50 -> 100; 100 -> -50; else -> 0 } },
-            QuickHudActionItem("CC", activeSubtitleLabel) {
+            QuickHudActionItem("↔", "Audio-Sync", formattedAudioDelay) {
+                isAudioDelayTunerActive = !isAudioDelayTunerActive
+                consecutiveHoldRepeats = 0
+            },
+            QuickHudActionItem("CC", "Untertitel", activeSubtitleLabel) {
+                isAudioDelayTunerActive = false
                 selectedDrawerIdx = if (selectedSubOverrideIdx >= 0) selectedSubOverrideIdx else if (globalSubtitlesEnabled) 1 else 0
                 hudLayer = HudOverlayLayer.SUBTITLE_DRAWER
             },
-            QuickHudActionItem("⛶", aspectModes[aspectModeIdx]) { aspectModeIdx = (aspectModeIdx + 1) % aspectModes.size },
-            QuickHudActionItem("⏲", sleepModes[sleepTimerIdx]) { sleepTimerIdx = (sleepTimerIdx + 1) % sleepModes.size },
-            QuickHudActionItem("⚙️", "Einstellungen") { onOpenSettings() }
+            QuickHudActionItem("⛶", "Bildformat", aspectModes[aspectModeIdx]) { aspectModeIdx = (aspectModeIdx + 1) % aspectModes.size },
+            QuickHudActionItem("⏲", "Sleep-Timer", sleepModes[sleepTimerIdx]) { sleepTimerIdx = (sleepTimerIdx + 1) % sleepModes.size },
+            QuickHudActionItem("⚙️", "Einstellungen", "Menü") { onOpenSettings() }
+        )
+    }
+
+    fun handleAcceleratedAudioDelayStep(direction: Int) {
+        val nowMs = Clock.System.now().toEpochMilliseconds()
+        val deltaMs = nowMs - lastDelayKeyEpochMs
+        if (direction == lastDelayDirection && deltaMs in 1L..195L) {
+            consecutiveHoldRepeats += 1
+        } else {
+            consecutiveHoldRepeats = 0
+        }
+        lastDelayKeyEpochMs = nowMs
+        lastDelayDirection = direction
+        val isAccelerated = consecutiveHoldRepeats >= 1
+        AetherPerStreamAudioDelayMatrix.applyStepWithAcceleration(
+            streamKey = effectiveStreamKey,
+            direction = direction,
+            isAcceleratedHold = isAccelerated
         )
     }
 
     LaunchedEffect(Unit) { runCatching { hudFocusRequester.requestFocus() } }
-    LaunchedEffect(interactionTick, isPlaying, isHudVisible, hudLayer) {
-        if (isHudVisible && isPlaying && hudLayer != HudOverlayLayer.SUBTITLE_DRAWER && hudLayer != HudOverlayLayer.AUDIO_DRAWER) {
-            delay(5000L); isHudVisible = false; hudLayer = HudOverlayLayer.TRANSPORT_BAR
+    LaunchedEffect(interactionTick, isPlaying, isHudVisible, hudLayer, isAudioDelayTunerActive) {
+        if (isHudVisible && isPlaying && !isAudioDelayTunerActive && hudLayer != HudOverlayLayer.SUBTITLE_DRAWER && hudLayer != HudOverlayLayer.AUDIO_DRAWER) {
+            delay(5000L)
+            isHudVisible = false
+            hudLayer = HudOverlayLayer.TRANSPORT_BAR
         }
     }
 
@@ -1448,12 +1526,34 @@ fun FullscreenPlayerHudOverlay(
             .focusRequester(hudFocusRequester)
             .focusable()
             .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp) {
+                    if (event.key == Key.DirectionLeft || event.key == Key.DirectionRight) {
+                        consecutiveHoldRepeats = 0
+                    }
+                    return@onKeyEvent true
+                }
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 interactionTick += 1L
                 if (!isHudVisible) {
                     isHudVisible = true
                     hudLayer = if (event.key == Key.DirectionDown) HudOverlayLayer.QUICK_ACTION_BAR else HudOverlayLayer.TRANSPORT_BAR
                     return@onKeyEvent true
+                }
+                if (isAudioDelayTunerActive) {
+                    return@onKeyEvent when (event.key) {
+                        Key.DirectionLeft -> { handleAcceleratedAudioDelayStep(-1); true }
+                        Key.DirectionRight -> { handleAcceleratedAudioDelayStep(1); true }
+                        Key.DirectionUp, Key.DirectionCenter, Key.Enter, Key.Back, Key.Escape -> {
+                            isAudioDelayTunerActive = false
+                            consecutiveHoldRepeats = 0
+                            true
+                        }
+                        Key.DirectionDown -> {
+                            AetherPerStreamAudioDelayMatrix.setDelayMs(effectiveStreamKey, 0)
+                            true
+                        }
+                        else -> true
+                    }
                 }
                 when (hudLayer) {
                     HudOverlayLayer.TRANSPORT_BAR -> when (event.key) {
@@ -1463,13 +1563,14 @@ fun FullscreenPlayerHudOverlay(
                         Key.DirectionLeft -> { selectedTransportIdx = (selectedTransportIdx - 1).coerceAtLeast(0); true }
                         Key.DirectionRight -> { selectedTransportIdx = (selectedTransportIdx + 1).coerceAtMost(5); true }
                         Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> {
+                            val currentPos = playerEngine.currentPositionMs.value
                             when (selectedTransportIdx) {
-                                0 -> if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onZapChannelOffset(-1)
+                                0 -> if (isCinemaMode) playerEngine.seekRelativeMs(-currentPos) else onZapChannelOffset(-1)
                                 1 -> if (isCinemaMode) playerEngine.seekRelativeMs(-15_000L) else onZapChannelOffset(-1)
                                 2 -> if (isPlaying) playerEngine.pause() else playerEngine.resume()
                                 3 -> if (isCinemaMode) playerEngine.seekRelativeMs(15_000L) else onZapChannelOffset(1)
                                 4 -> if (isCinemaMode) playerEngine.seekRelativeMs(60_000L) else onZapChannelOffset(1)
-                                5 -> if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onCyclePreset()
+                                5 -> if (isCinemaMode) playerEngine.seekRelativeMs(-currentPos) else onCyclePreset()
                             }
                             true
                         }
@@ -1479,10 +1580,11 @@ fun FullscreenPlayerHudOverlay(
                     HudOverlayLayer.QUICK_ACTION_BAR -> when (event.key) {
                         Key.DirectionLeft -> { selectedQuickIdx = (selectedQuickIdx - 1).coerceAtLeast(0); true }
                         Key.DirectionRight -> { selectedQuickIdx = (selectedQuickIdx + 1).coerceAtMost(quickActionItems.lastIndex); true }
-                        Key.DirectionDown -> true
-                        Key.DirectionUp, Key.Back, Key.Escape -> { hudLayer = HudOverlayLayer.TRANSPORT_BAR; selectedTransportIdx = 2; true }
+                        Key.DirectionDown -> true // Strict Focus-Lock Invariant: Never escape downward!
+                        Key.DirectionUp -> { hudLayer = HudOverlayLayer.TRANSPORT_BAR; selectedTransportIdx = 2; true }
+                        Key.Back, Key.Escape -> { isHudVisible = false; hudLayer = HudOverlayLayer.TRANSPORT_BAR; true }
                         Key.DirectionCenter, Key.Enter -> { quickActionItems[selectedQuickIdx].onActivate(); true }
-                        else -> false
+                        else -> true
                     }
                     HudOverlayLayer.SUBTITLE_DRAWER -> when (event.key) {
                         Key.DirectionUp -> { selectedDrawerIdx = (selectedDrawerIdx - 1).coerceAtLeast(0); true }
@@ -1506,10 +1608,11 @@ fun FullscreenPlayerHudOverlay(
             }
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { interactionTick += 1L; isHudVisible = !isHudVisible }
     ) {
-        AnimatedVisibility(visible = isHudVisible, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(AetherColors.ObsidianBlack.copy(alpha = 0.65f), Color.Transparent, AetherColors.ObsidianBlack.copy(alpha = 0.90f))))) {
+        AnimatedVisibility(visible = isHudVisible, enter = fadeIn(tween(180)), exit = fadeOut(tween(160)), modifier = Modifier.fillMaxSize()) {
+            Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(AetherColors.ObsidianBlack.copy(alpha = 0.65f), Color.Transparent, AetherColors.ObsidianBlack.copy(alpha = 0.92f))))) {
                 Text(clockSnapshot.dateTimeLabelDe, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false, modifier = Modifier.align(Alignment.TopEnd).padding(horizontal = 32.dp, vertical = 22.dp))
 
+                // LAYER 1: TRANSPORT BAR
                 if (hudLayer == HudOverlayLayer.TRANSPORT_BAR) {
                     Column(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 36.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
@@ -1518,67 +1621,85 @@ fun FullscreenPlayerHudOverlay(
                                 WhiteHudTechBadge(resolutionText.replace(" × ", "x"))
                                 WhiteHudTechBadge(fpsText)
                                 WhiteHudTechBadge(activeAudioLabel.uppercase())
+                                if (currentStreamAudioDelayMs != 0) WhiteHudTechBadge("SYNC $formattedAudioDelay")
                             }
                         }
-                        val progress = if (durationMs > 0L) (currentPosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 1f
-                        BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(14.dp), contentAlignment = Alignment.CenterStart) {
-                            val barWidth = maxWidth
-                            Box(modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.30f)))
-                            Box(modifier = Modifier.fillMaxWidth(progress).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White))
-                            val thumbOffset = (barWidth * progress - 6.dp).coerceAtLeast(0.dp)
-                            Box(modifier = Modifier.offset(x = thumbOffset).size(12.dp).clip(CircleShape).background(Color.White))
-                        }
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                text = if (isCinemaMode && durationMs > 0L) "${formatMillisToTime(currentPosMs)} / ${formatMillisToTime(durationMs)}" else "LIVE • Puffer: ${currentPreset.name}",
-                                color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterStart)
-                            )
-                            Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    HudTransportCircleButton("⏮", selectedTransportIdx == 0, false) { selectedTransportIdx = 0; if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onZapChannelOffset(-1) }
-                                    HudTransportCircleButton("⏪", selectedTransportIdx == 1, false) { selectedTransportIdx = 1; if (isCinemaMode) playerEngine.seekRelativeMs(-15_000L) else onZapChannelOffset(-1) }
-                                    HudTransportCircleButton(if (isPlaying) "▶" else "⏸", selectedTransportIdx == 2, true) { selectedTransportIdx = 2; if (isPlaying) playerEngine.pause() else playerEngine.resume() }
-                                    HudTransportCircleButton("⏩", selectedTransportIdx == 3, false) { selectedTransportIdx = 3; if (isCinemaMode) playerEngine.seekRelativeMs(15_000L) else onZapChannelOffset(1) }
-                                    HudTransportCircleButton("⏭", selectedTransportIdx == 4, false) { selectedTransportIdx = 4; if (isCinemaMode) playerEngine.seekRelativeMs(60_000L) else onZapChannelOffset(1) }
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("⌄", color = Color.White.copy(alpha = 0.85f), fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { hudLayer = HudOverlayLayer.QUICK_ACTION_BAR })
-                            }
-                            Box(modifier = Modifier.align(Alignment.CenterEnd)) {
-                                HudTransportCircleButton("↺", selectedTransportIdx == 5, false) { selectedTransportIdx = 5; if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onCyclePreset() }
-                            }
-                        }
+
+                        HudIsolatedTimelineScrubber(
+                            playerEngine = playerEngine,
+                            isCinemaMode = isCinemaMode,
+                            currentPreset = currentPreset,
+                            isPlaying = isPlaying,
+                            selectedTransportIdx = selectedTransportIdx,
+                            onSelectTransportIdx = { selectedTransportIdx = it },
+                            onZapChannelOffset = onZapChannelOffset,
+                            onCyclePreset = onCyclePreset,
+                            onOpenQuickBar = { hudLayer = HudOverlayLayer.QUICK_ACTION_BAR }
+                        )
                     }
                 }
 
+                // LAYER 2: QUICK-MENU CAROUSEL & INLINE PER-STREAM AUDIO-DELAY TUNER
                 if (hudLayer == HudOverlayLayer.QUICK_ACTION_BAR) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 24.dp, vertical = 28.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(horizontal = 24.dp, vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        quickActionItems.forEachIndexed { idx, actionItem ->
-                            val isSelected = idx == selectedQuickIdx
-                            val circleScale by animateFloatAsState(if (isSelected) 1.14f else 1.0f, tween(120, easing = FastOutSlowInEasing), label = "QScale")
-                            Column(modifier = Modifier.width(96.dp).clickable { selectedQuickIdx = idx; actionItem.onActivate() }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(50.dp)
-                                        .graphicsLayer { scaleX = circleScale; scaleY = circleScale }
-                                        .clip(CircleShape)
-                                        .background(if (isSelected) Color.White else AetherColors.ObsidianBlack.copy(alpha = 0.50f))
-                                        .border(if (isSelected) 2.dp else 1.dp, if (isSelected) AetherColors.CyberCyan else Color.White.copy(alpha = 0.22f), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(actionItem.icon, color = if (isSelected) AetherColors.ObsidianBlack else Color.White, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+                        if (isAudioDelayTunerActive) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(AetherColors.DeepSpaceNavy.copy(alpha = 0.96f))
+                                    .border(1.5.dp, AetherColors.CyberCyan, RoundedCornerShape(14.dp))
+                                    .padding(horizontal = 22.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(18.dp)
+                            ) {
+                                Text("🔊 Kanal Audio-Sync ($streamTitle):", color = AetherColors.IceBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color.White).padding(horizontal = 12.dp, vertical = 4.dp)) {
+                                    Text("◀  $formattedAudioDelay  ▶", color = AetherColors.ObsidianBlack, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
                                 }
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text(actionItem.label, color = if (isSelected) Color.White else Color.White.copy(alpha = 0.85f), fontSize = 12.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                Text("Klick: ±50ms • Halten: ±100ms • [UNTEN] = 0ms Reset • [OK] = Fertig", color = AetherColors.CyberCyan, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            quickActionItems.forEachIndexed { idx, actionItem ->
+                                val isSelected = idx == selectedQuickIdx
+                                val circleScale by animateFloatAsState(if (isSelected) 1.14f else 1.0f, tween(120, easing = FastOutSlowInEasing), label = "QScale")
+                                val circleBgColor by androidx.compose.animation.animateColorAsState(if (isSelected) Color.White else AetherColors.ObsidianBlack.copy(alpha = 0.58f), tween(120), label = "QBg")
+                                val iconTextColor by androidx.compose.animation.animateColorAsState(if (isSelected) AetherColors.ObsidianBlack else Color.White, tween(120), label = "QIcon")
+
+                                Column(
+                                    modifier = Modifier.width(96.dp).clickable { selectedQuickIdx = idx; actionItem.onActivate() },
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(52.dp)
+                                            .graphicsLayer { scaleX = circleScale; scaleY = circleScale }
+                                            .clip(CircleShape)
+                                            .background(circleBgColor)
+                                            .border(if (isSelected) 2.dp else 1.dp, if (isSelected) AetherColors.CyberCyan else AetherColors.CyberCyan.copy(alpha = 0.32f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(actionItem.icon, color = iconTextColor, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(actionItem.title, color = if (isSelected) Color.White else Color.White.copy(alpha = 0.85f), fontSize = 12.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                    Text(actionItem.statusLabel, color = if (isSelected) AetherColors.CyberCyan else AetherColors.IceBlue.copy(alpha = 0.72f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                }
                             }
                         }
                     }
                 }
 
+                // LAYER 3: RIGHT TRACK SELECTION DRAWER
                 if (hudLayer == HudOverlayLayer.SUBTITLE_DRAWER || hudLayer == HudOverlayLayer.AUDIO_DRAWER) {
                     val isSubDrawer = hudLayer == HudOverlayLayer.SUBTITLE_DRAWER
                     val drawerTitle = if (isSubDrawer) "Untertitel" else "Audio-Spur"
@@ -1624,13 +1745,13 @@ fun FullscreenPlayerHudOverlay(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isToggleRowFocused) Color.White.copy(alpha = 0.14f) else Color.Transparent)
+                                        .background(if (isToggleRowFocused) Color.White else Color.Transparent)
                                         .clickable { selectedDrawerIdx = options.size; globalSubtitlesEnabled = !globalSubtitlesEnabled }
-                                        .padding(horizontal = 8.dp, vertical = 10.dp),
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("Falls verfügbar, Untertitel für alle\nKanäle anzeigen", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 17.sp)
+                                    Text("Falls verfügbar, Untertitel für alle\nKanäle anzeigen", color = if (isToggleRowFocused) AetherColors.ObsidianBlack else Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 17.sp)
                                     Box(
                                         modifier = Modifier.width(40.dp).height(22.dp).clip(CircleShape).background(if (globalSubtitlesEnabled) AetherColors.CyberCyan.copy(alpha = 0.45f) else AetherColors.ObsidianBlack),
                                         contentAlignment = if (globalSubtitlesEnabled) Alignment.CenterEnd else Alignment.CenterStart
@@ -1644,6 +1765,52 @@ fun FullscreenPlayerHudOverlay(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun HudIsolatedTimelineScrubber(
+    playerEngine: AetherVideoPlayerEngine,
+    isCinemaMode: Boolean,
+    currentPreset: StreamBufferPreset,
+    isPlaying: Boolean,
+    selectedTransportIdx: Int,
+    onSelectTransportIdx: (Int) -> Unit,
+    onZapChannelOffset: (Int) -> Unit,
+    onCyclePreset: () -> Unit,
+    onOpenQuickBar: () -> Unit
+) {
+    val currentPosMs by playerEngine.currentPositionMs.collectAsState()
+    val durationMs by playerEngine.durationMs.collectAsState()
+    val progress = if (durationMs > 0L) (currentPosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 1f
+
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(14.dp), contentAlignment = Alignment.CenterStart) {
+        val barWidth = maxWidth
+        Box(modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.30f)))
+        Box(modifier = Modifier.fillMaxWidth(progress).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White))
+        val thumbOffset = (barWidth * progress - 6.dp).coerceAtLeast(0.dp)
+        Box(modifier = Modifier.offset(x = thumbOffset).size(12.dp).clip(CircleShape).background(Color.White))
+    }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = if (isCinemaMode && durationMs > 0L) "${formatMillisToTime(currentPosMs)} / ${formatMillisToTime(durationMs)}" else "LIVE • Puffer: ${currentPreset.name}",
+            color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterStart)
+        )
+        Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
+                HudTransportCircleButton("⏮", selectedTransportIdx == 0, false) { onSelectTransportIdx(0); if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onZapChannelOffset(-1) }
+                HudTransportCircleButton("⏪", selectedTransportIdx == 1, false) { onSelectTransportIdx(1); if (isCinemaMode) playerEngine.seekRelativeMs(-15_000L) else onZapChannelOffset(-1) }
+                HudTransportCircleButton(if (isPlaying) "▶" else "⏸", selectedTransportIdx == 2, true) { onSelectTransportIdx(2); if (isPlaying) playerEngine.pause() else playerEngine.resume() }
+                HudTransportCircleButton("⏩", selectedTransportIdx == 3, false) { onSelectTransportIdx(3); if (isCinemaMode) playerEngine.seekRelativeMs(15_000L) else onZapChannelOffset(1) }
+                HudTransportCircleButton("⏭", selectedTransportIdx == 4, false) { onSelectTransportIdx(4); if (isCinemaMode) playerEngine.seekRelativeMs(60_000L) else onZapChannelOffset(1) }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("⌄", color = Color.White.copy(alpha = 0.85f), fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onOpenQuickBar() })
+        }
+        Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+            HudTransportCircleButton("↺", selectedTransportIdx == 5, false) { onSelectTransportIdx(5); if (isCinemaMode) playerEngine.seekRelativeMs(-currentPosMs) else onCyclePreset() }
         }
     }
 }
