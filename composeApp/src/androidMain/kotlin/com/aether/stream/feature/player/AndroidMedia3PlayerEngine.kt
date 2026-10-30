@@ -25,6 +25,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.aether.stream.core.navigation.StreamBufferPreset
@@ -67,7 +68,7 @@ class AndroidMedia3PlayerEngine(
 
     companion object {
         private const val IPTV_USER_AGENT = "TiviMate/5.1.0 (Linux; Android 11) ExoPlayerLib/2.19.1"
-        private const val PREBUFFER_BYTES_LIMIT = 200 * 1024 // 200 KB Ring-Buffer Slot
+        private const val PREBUFFER_BYTES_LIMIT = 200 * 1024
         private const val MAX_RING_BUFFER_SLOTS = 4
 
         init {
@@ -119,14 +120,12 @@ class AndroidMedia3PlayerEngine(
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
     private var reconnectCount = 0
 
-    // Module 3: Active Stream Track & Audio-Delay Auto-Memory
     private var pendingPreferredAudioId: String? = null
     private var pendingPreferredSubtitleId: String? = null
     private var activeAudioDelayOffsetMs: Int = 0
     private var lastAppliedAfrHz: Float = 0f
     internal var activeSurfaceViewRef: SurfaceView? = null
 
-    // STRICT INVARIANT: playerListener MUST be initialized prior to buildExoPlayer(currentPreset)
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
@@ -227,7 +226,6 @@ class AndroidMedia3PlayerEngine(
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
 
-        // Sub-Second Instant-Zap LoadControl (<100ms First-Frame Start when prebuffered)
         val fastStartBufferMs = 350
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
@@ -243,19 +241,21 @@ class AndroidMedia3PlayerEngine(
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
 
+        val trackSelector = DefaultTrackSelector(context).apply {
+            setParameters(
+                buildUponParameters()
+                    .setTunnelingEnabled(AetherSettingsStore.state.value.tunneledPlayback)
+            )
+        }
+
         return ExoPlayer.Builder(context, renderersFactory)
+            .setTrackSelector(trackSelector)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build()
             .apply {
                 playWhenReady = true
                 addListener(playerListener)
-                if (AetherSettingsStore.state.value.tunneledPlayback) {
-                    trackSelectionParameters = trackSelectionParameters
-                        .buildUpon()
-                        .setTunnelingEnabled(true)
-                        .build()
-                }
             }
     }
 
@@ -267,7 +267,6 @@ class AndroidMedia3PlayerEngine(
         _isPlaybackEnded.value = false
         _currentPositionMs.value = startPositionMs
 
-        // Module 1: Check if predictive ring-buffer already resolved the 302 Edge CDN URL & warmed socket
         val prebufferedSlot = synchronized(predictiveRingBuffer) { predictiveRingBuffer[cleanUrl] }
         val effectivePlayUrl = if (prebufferedSlot != null &&
             (System.currentTimeMillis() - prebufferedSlot.timestampMs) < 45_000L
@@ -284,14 +283,13 @@ class AndroidMedia3PlayerEngine(
         }
     }
 
-    /**
-     * MODULE 1: Predictive Pre-Buffering Engine (First 200KB Ring-Buffer + 302 Redirect Resolution)
-     * Triggered after >300ms D-Pad dwell on a channel row for adjacent channels (Index - 1, Index + 1).
-     */
     override fun prebufferAdjacentStreams(prevUrl: String?, nextUrl: String?) {
         predictiveZapJob?.cancel()
         predictiveZapJob = ioScope.launch {
-            val targets = listOfNotNull(prevUrl?.trim()?.takeIf { it.startsWith("http") }, nextUrl?.trim()?.takeIf { it.startsWith("http") })
+            val targets = listOfNotNull(
+                prevUrl?.trim()?.takeIf { it.startsWith("http") },
+                nextUrl?.trim()?.takeIf { it.startsWith("http") }
+            )
             for (targetUrl in targets) {
                 if (!isActive || targetUrl == currentStreamUrl) continue
                 val alreadyWarm = synchronized(predictiveRingBuffer) {
@@ -341,9 +339,6 @@ class AndroidMedia3PlayerEngine(
         }
     }
 
-    /**
-     * MODULE 3: Restores saved Audio Track ID, Subtitle Track ID, and Audio Delay for the tuned channel.
-     */
     override fun applySavedStreamTrackMemory(
         preferredAudioId: String?,
         preferredSubtitleId: String?,
@@ -490,7 +485,6 @@ class AndroidMedia3PlayerEngine(
                         _techMetadata.update {
                             it.copy(resolutionLabel = res, fpsLabel = fps, videoCodec = vCodec, detectedFrameRate = rawFps)
                         }
-                        // Module 4: Trigger Dynamic Automatic Frame Rate (AFR) HDMI matching
                         applyDynamicHardwareAfrIfEnabled(rawFps)
                     }
                 }
@@ -520,7 +514,6 @@ class AndroidMedia3PlayerEngine(
         _audioTracks.value = audioList
         _subtitleTracks.value = subtitleList
 
-        // Module 3: Auto-Restitution of preferred Audio/Subtitle tracks on stream start
         val savedAudioId = pendingPreferredAudioId
         if (!savedAudioId.isNullOrBlank()) {
             val matchedAudio = audioList.firstOrNull { it.trackId == savedAudioId || it.languageLabel == savedAudioId }
@@ -541,16 +534,11 @@ class AndroidMedia3PlayerEngine(
         }
     }
 
-    /**
-     * MODULE 4: Dynamic Automatic Frame Rate (AFR) Matching via DisplayManager & Surface API
-     * Switches Fire TV HDMI output refresh rate (Hz) to match native stream FPS (23.976, 24, 25->50, 29.97->59.94, 50, 60).
-     */
     private fun applyDynamicHardwareAfrIfEnabled(streamFps: Float) {
         if (streamFps <= 0f) return
         val afrMode = AetherSettingsStore.state.value.autoFrameRateMode
         if (afrMode == "Aus") return
 
-        // SurfaceFlinger Hint on Android 11+ (API 30+ / Fire OS 8)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             runCatching {
                 activeSurfaceViewRef?.holder?.surface?.takeIf { it.isValid }?.setFrameRate(
@@ -560,7 +548,6 @@ class AndroidMedia3PlayerEngine(
             }
         }
 
-        // Normalize 25fps -> 50Hz and 29.97/30fps -> 59.94/60Hz for HDMI TVs
         val targetHz = when {
             abs(streamFps - 25.0f) < 0.5f -> 50.0f
             abs(streamFps - 29.97f) < 0.05f -> 59.94f
