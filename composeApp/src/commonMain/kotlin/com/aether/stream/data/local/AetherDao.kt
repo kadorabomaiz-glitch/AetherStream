@@ -116,19 +116,34 @@ interface AetherDao {
     @Query("SELECT s.* FROM stream_items s INNER JOIN favorite_folder_mappings m ON s.uniqueStreamKey = m.uniqueStreamKey WHERE m.folderId = :folderId AND s.isVisible = 1 AND s.isLocked = 0 ORDER BY m.addedEpochMillis DESC")
     fun observeStreamsInFavoriteFolder(folderId: Long): Flow<List<StreamItemEntity>>
 
+    @Query("SELECT s.* FROM stream_items s INNER JOIN favorite_folder_mappings m ON s.uniqueStreamKey = m.uniqueStreamKey WHERE m.folderId = :folderId AND s.sectionType = :sectionType AND s.isVisible = 1 AND s.isLocked = 0 ORDER BY m.addedEpochMillis DESC")
+    fun observeStreamsInFavoriteFolderForSection(folderId: Long, sectionType: AetherSectionType): Flow<List<StreamItemEntity>>
+
     @Query("UPDATE stream_items SET resumePositionMs = :positionMs, totalDurationMs = :durationMs, lastWatchedEpochMillis = :watchedAt WHERE uniqueStreamKey = :uniqueStreamKey")
     suspend fun updateWatchProgress(uniqueStreamKey: String, positionMs: Long, durationMs: Long, watchedAt: Long)
 
-    @Query("SELECT * FROM stream_items WHERE playlistId = :playlistId AND sectionType = :sectionType AND lastWatchedEpochMillis > 0 AND isVisible = 1 AND isLocked = 0 ORDER BY lastWatchedEpochMillis DESC LIMIT 30")
+    @Query("SELECT * FROM stream_items WHERE playlistId = :playlistId AND sectionType = :sectionType AND lastWatchedEpochMillis > 0 AND isVisible = 1 AND isLocked = 0 ORDER BY lastWatchedEpochMillis DESC LIMIT 40")
     fun observeRecentlyWatched(playlistId: Long, sectionType: AetherSectionType): Flow<List<StreamItemEntity>>
 
     @Query("""
         SELECT * FROM stream_items 
         WHERE playlistId = :playlistId AND isVisible = 1 AND isLocked = 0 AND name LIKE '%' || :searchQuery || '%' 
-        ORDER BY CASE sectionType WHEN 'LIVE' THEN 1 WHEN 'VOD' THEN 2 WHEN 'SERIES' THEN 3 END, name ASC 
-        LIMIT 100
+        ORDER BY CASE sectionType WHEN 'VOD' THEN 1 WHEN 'SERIES' THEN 2 WHEN 'LIVE' THEN 3 END, name ASC 
+        LIMIT 200
     """)
     fun searchVisibleStreams(playlistId: Long, searchQuery: String): Flow<List<StreamItemEntity>>
+
+    @Query("""
+        SELECT * FROM stream_items 
+        WHERE playlistId = :playlistId AND isVisible = 1 AND isLocked = 0 
+        AND name LIKE '%' || :t1 || '%' 
+        AND (:t2 = '' OR name LIKE '%' || :t2 || '%') 
+        AND (:t3 = '' OR name LIKE '%' || :t3 || '%') 
+        AND (:t4 = '' OR name LIKE '%' || :t4 || '%') 
+        ORDER BY CASE sectionType WHEN 'VOD' THEN 1 WHEN 'SERIES' THEN 2 WHEN 'LIVE' THEN 3 END, name ASC 
+        LIMIT 250
+    """)
+    fun searchVisibleStreamsMultiToken(playlistId: Long, t1: String, t2: String = "", t3: String = "", t4: String = ""): Flow<List<StreamItemEntity>>
 
     @Query("SELECT DISTINCT seasonNumber FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey ORDER BY seasonNumber ASC")
     suspend fun getAvailableSeasons(seriesStreamKey: String): List<Int>
@@ -147,10 +162,6 @@ interface AetherDao {
 
     @Query("DELETE FROM series_episodes WHERE seriesStreamKey = :seriesStreamKey")
     suspend fun deleteEpisodesForSeries(seriesStreamKey: String)
-
-    // ==========================================
-    // MODUL 2 & 3: EPG FUZZY-SEARCH & STREAM AUTO-MEMORY
-    // ==========================================
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertStreamSettings(settings: StreamSettingsEntity)
