@@ -3,6 +3,8 @@ package com.aether.stream.feature.player
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Color as AndroidColor
+import android.graphics.Typeface
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.view.Display
@@ -10,6 +12,8 @@ import android.view.Surface
 import android.view.SurfaceView
 import androidx.annotation.OptIn
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
@@ -19,19 +23,29 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.mp4.Mp4Extractor
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import androidx.media3.extractor.ts.TsExtractor
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import com.aether.stream.core.navigation.StreamBufferPreset
 import com.aether.stream.feature.settings.AetherSettingsStore
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.HttpsURLConnection
@@ -62,6 +76,143 @@ private data class PrebufferedStreamSlot(
 )
 
 @OptIn(UnstableApi::class)
+private class AetherPcmDelayAudioProcessor : AudioProcessor {
+    @Volatile private var requestedDelayMs: Int = 0
+    private var inputAudioFormat: AudioProcessor.AudioFormat = AudioProcessor.AudioFormat.NOT_SET
+    private var outputAudioFormat: AudioProcessor.AudioFormat = AudioProcessor.AudioFormat.NOT_SET
+    private var isInputEnded: Boolean = false
+    private var outputBuffer: ByteBuffer = AudioProcessor.EMPTY_BUFFER
+    private var delayRingBuffer: ByteArray = ByteArray(0)
+    private var writeCursor: Int = 0
+    private var readCursor: Int = 0
+    private var bufferedBytesCount: Int = 0
+    private var pendingSkipBytes: Int = 0
+
+    fun setDelayOffsetMs(delayMs: Int) {
+        val clamped = delayMs.coerceIn(-5000, 5000)
+        if (requestedDelayMs != clamped) {
+            val deltaMs = clamped - requestedDelayMs
+            requestedDelayMs = clamped
+            val fmt = inputAudioFormat
+            if (fmt != AudioProcessor.AudioFormat.NOT_SET && fmt.sampleRate > 0 && fmt.bytesPerFrame > 0 && deltaMs < 0) {
+                val bytesToDrop = ((abs(deltaMs).toLong() * fmt.sampleRate * fmt.bytesPerFrame) / 1000L).toInt()
+                val alignedDrop = (bytesToDrop / fmt.bytesPerFrame) * fmt.bytesPerFrame
+                synchronized(this) {
+                    if (bufferedBytesCount >= alignedDrop) {
+                        readCursor = (readCursor + alignedDrop) % delayRingBuffer.size.coerceAtLeast(1)
+                        bufferedBytesCount -= alignedDrop
+                    } else {
+                        val remainingToSkip = alignedDrop - bufferedBytesCount
+                        bufferedBytesCount = 0; readCursor = 0; writeCursor = 0
+                        pendingSkipBytes = (pendingSkipBytes + remainingToSkip).coerceAtMost(fmt.sampleRate * fmt.bytesPerFrame * 5)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun configure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount <= 0) {
+            this.inputAudioFormat = AudioProcessor.AudioFormat.NOT_SET
+            this.outputAudioFormat = AudioProcessor.AudioFormat.NOT_SET
+            return AudioProcessor.AudioFormat.NOT_SET
+        }
+        this.inputAudioFormat = inputAudioFormat
+        this.outputAudioFormat = inputAudioFormat
+        val maxDelayBytes = inputAudioFormat.sampleRate * inputAudioFormat.bytesPerFrame * 6
+        synchronized(this) {
+            if (delayRingBuffer.size < maxDelayBytes) delayRingBuffer = ByteArray(maxDelayBytes)
+            writeCursor = 0; readCursor = 0; bufferedBytesCount = 0; pendingSkipBytes = 0
+        }
+        return outputAudioFormat
+    }
+
+    override fun isActive(): Boolean = inputAudioFormat != AudioProcessor.AudioFormat.NOT_SET
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        val remaining = inputBuffer.remaining()
+        if (remaining == 0) return
+        val fmt = inputAudioFormat
+        val currentDelayMs = requestedDelayMs
+        if (fmt == AudioProcessor.AudioFormat.NOT_SET || fmt.bytesPerFrame <= 0) {
+            ensureOutputCapacity(remaining); outputBuffer.put(inputBuffer); outputBuffer.flip(); return
+        }
+
+        synchronized(this) {
+            if (pendingSkipBytes > 0) {
+                val skipNow = minOf(remaining, pendingSkipBytes)
+                val alignedSkip = (skipNow / fmt.bytesPerFrame) * fmt.bytesPerFrame
+                if (alignedSkip > 0) {
+                    inputBuffer.position(inputBuffer.position() + alignedSkip)
+                    pendingSkipBytes -= alignedSkip
+                }
+                if (!inputBuffer.hasRemaining()) { ensureOutputCapacity(0); outputBuffer.flip(); return }
+            }
+
+            val targetDelayBytes = if (currentDelayMs > 0) {
+                val rawBytes = ((currentDelayMs.toLong() * fmt.sampleRate * fmt.bytesPerFrame) / 1000L).toInt()
+                ((rawBytes / fmt.bytesPerFrame) * fmt.bytesPerFrame).coerceIn(0, delayRingBuffer.size / 2)
+            } else 0
+
+            if (targetDelayBytes == 0 && bufferedBytesCount == 0) {
+                val bytesNow = inputBuffer.remaining()
+                ensureOutputCapacity(bytesNow); outputBuffer.put(inputBuffer); outputBuffer.flip(); return
+            }
+
+            val inBytes = inputBuffer.remaining()
+            val ringCap = delayRingBuffer.size
+            if (ringCap > 0 && inBytes <= ringCap - bufferedBytesCount) {
+                val firstChunk = minOf(inBytes, ringCap - writeCursor)
+                inputBuffer.get(delayRingBuffer, writeCursor, firstChunk)
+                val secondChunk = inBytes - firstChunk
+                if (secondChunk > 0) inputBuffer.get(delayRingBuffer, 0, secondChunk)
+                writeCursor = (writeCursor + inBytes) % ringCap
+                bufferedBytesCount += inBytes
+            } else {
+                ensureOutputCapacity(inBytes); outputBuffer.put(inputBuffer); outputBuffer.flip(); return
+            }
+
+            if (bufferedBytesCount <= targetDelayBytes) {
+                val silenceBytes = (inBytes / fmt.bytesPerFrame) * fmt.bytesPerFrame
+                ensureOutputCapacity(silenceBytes)
+                for (i in 0 until silenceBytes) outputBuffer.put(0.toByte())
+                outputBuffer.flip()
+            } else {
+                val playableBytes = bufferedBytesCount - targetDelayBytes
+                val outBytes = minOf(playableBytes, maxOf(inBytes, fmt.bytesPerFrame * 256))
+                val alignedOut = (outBytes / fmt.bytesPerFrame) * fmt.bytesPerFrame
+                ensureOutputCapacity(alignedOut)
+                val firstRead = minOf(alignedOut, ringCap - readCursor)
+                outputBuffer.put(delayRingBuffer, readCursor, firstRead)
+                val secondRead = alignedOut - firstRead
+                if (secondRead > 0) outputBuffer.put(delayRingBuffer, 0, secondRead)
+                readCursor = (readCursor + alignedOut) % ringCap
+                bufferedBytesCount -= alignedOut
+                outputBuffer.flip()
+            }
+        }
+    }
+
+    private fun ensureOutputCapacity(capacity: Int) {
+        if (outputBuffer.capacity() < capacity) {
+            outputBuffer = ByteBuffer.allocateDirect(capacity).order(ByteOrder.nativeOrder())
+        } else outputBuffer.clear()
+    }
+
+    override fun queueEndOfStream() { isInputEnded = true }
+    override fun getOutput(): ByteBuffer { val out = outputBuffer; outputBuffer = AudioProcessor.EMPTY_BUFFER; return out }
+    override fun isEnded(): Boolean = isInputEnded && outputBuffer === AudioProcessor.EMPTY_BUFFER && bufferedBytesCount == 0
+    override fun flush() {
+        outputBuffer = AudioProcessor.EMPTY_BUFFER; isInputEnded = false
+        synchronized(this) { writeCursor = 0; readCursor = 0; bufferedBytesCount = 0; pendingSkipBytes = 0 }
+    }
+    override fun reset() {
+        flush(); inputAudioFormat = AudioProcessor.AudioFormat.NOT_SET; outputAudioFormat = AudioProcessor.AudioFormat.NOT_SET
+        synchronized(this) { delayRingBuffer = ByteArray(0) }
+    }
+}
+
+@OptIn(UnstableApi::class)
 class AndroidMedia3PlayerEngine(
     private val context: Context
 ) : AetherVideoPlayerEngine {
@@ -78,9 +229,7 @@ class AndroidMedia3PlayerEngine(
                     override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
                     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
                 })
-                val sslContext = SSLContext.getInstance("TLS").apply {
-                    init(null, trustAllCerts, SecureRandom())
-                }
+                val sslContext = SSLContext.getInstance("TLS").apply { init(null, trustAllCerts, SecureRandom()) }
                 HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
                 HttpsURLConnection.setDefaultHostnameVerifier { _, _ -> true }
             }
@@ -95,6 +244,9 @@ class AndroidMedia3PlayerEngine(
     private val prebufferSemaphore = Semaphore(1)
     private val predictiveRingBuffer = LinkedHashMap<String, PrebufferedStreamSlot>()
 
+    private val pcmDelayProcessor = AetherPcmDelayAudioProcessor()
+    private var activeTrackSelector: DefaultTrackSelector? = null
+
     private val _techMetadata = MutableStateFlow(StreamTechMetadata())
     override val techMetadata: StateFlow<StreamTechMetadata> = _techMetadata.asStateFlow()
 
@@ -103,6 +255,9 @@ class AndroidMedia3PlayerEngine(
 
     private val _subtitleTracks = MutableStateFlow<List<TrackOption>>(emptyList())
     override val subtitleTracks: StateFlow<List<TrackOption>> = _subtitleTracks.asStateFlow()
+
+    private val _videoTracks = MutableStateFlow<List<TrackOption>>(emptyList())
+    override val videoTracks: StateFlow<List<TrackOption>> = _videoTracks.asStateFlow()
 
     private val _currentPositionMs = MutableStateFlow(0L)
     override val currentPositionMs: StateFlow<Long> = _currentPositionMs.asStateFlow()
@@ -115,6 +270,12 @@ class AndroidMedia3PlayerEngine(
 
     private val _isPlaybackEnded = MutableStateFlow(false)
     override val isPlaybackEnded: StateFlow<Boolean> = _isPlaybackEnded.asStateFlow()
+
+    private val _videoAspectMode = MutableStateFlow(VideoAspectMode.FIT)
+    override val videoAspectMode: StateFlow<VideoAspectMode> = _videoAspectMode.asStateFlow()
+
+    private val _audioDelayOffsetMs = MutableStateFlow(0)
+    override val audioDelayOffsetMs: StateFlow<Int> = _audioDelayOffsetMs.asStateFlow()
 
     private var currentStreamUrl: String? = null
     private var currentPreset: StreamBufferPreset = StreamBufferPreset.BALANCED
@@ -130,37 +291,23 @@ class AndroidMedia3PlayerEngine(
         override fun onPlaybackStateChanged(playbackState: Int) {
             val buffering = playbackState == Player.STATE_BUFFERING
             _techMetadata.update { it.copy(isBuffering = buffering) }
-
             if (playbackState == Player.STATE_READY) {
                 reconnectCount = 0
-                _techMetadata.update { it.copy(reconnectAttempt = 0) }
+                _techMetadata.update { it.copy(reconnectAttempt = 0, isBuffering = false) }
                 updatePlaybackDurations()
             }
-
             val ended = playbackState == Player.STATE_ENDED
             _isPlaybackEnded.value = ended
-            if (ended) {
-                stopProgressTicker()
-                _isPlaying.value = false
-            }
+            if (ended) { stopProgressTicker(); _isPlaying.value = false }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
-            if (isPlaying) {
-                _isPlaybackEnded.value = false
-                startProgressTicker()
-            } else {
-                stopProgressTicker()
-                updatePlaybackDurations()
-            }
+            if (isPlaying) { _isPlaybackEnded.value = false; startProgressTicker() }
+            else { stopProgressTicker(); updatePlaybackDurations() }
         }
 
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int
-        ) {
+        override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
             updatePlaybackDurations()
         }
 
@@ -175,16 +322,19 @@ class AndroidMedia3PlayerEngine(
                 reconnectCount++
                 val lastKnownPos = runCatching { exoPlayer.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
                 _techMetadata.update { it.copy(reconnectAttempt = reconnectCount, isBuffering = true) }
-
                 val candidateUrl = buildSmartFallbackUrl(baseUrl, reconnectCount)
+                val isVodOrSeries = baseUrl.contains("/movie/") || baseUrl.contains("/series/")
+                val retryBackoffMs = if (isVodOrSeries) 180L * reconnectCount else 300L * reconnectCount
                 scope.launch {
-                    delay(300L * reconnectCount)
+                    delay(retryBackoffMs)
                     runCatching {
                         exoPlayer.setMediaItem(MediaItem.fromUri(candidateUrl), lastKnownPos)
                         exoPlayer.prepare()
                         exoPlayer.play()
                     }
                 }
+            } else {
+                _techMetadata.update { it.copy(isBuffering = false) }
             }
         }
     }
@@ -195,21 +345,16 @@ class AndroidMedia3PlayerEngine(
     private fun buildSmartFallbackUrl(originalUrl: String, attempt: Int): String {
         val isVodOrSeries = originalUrl.contains("/movie/") || originalUrl.contains("/series/")
         if (!isVodOrSeries || attempt <= 1) return originalUrl
-
         val lastDotIndex = originalUrl.lastIndexOf('.')
         val lastSlashIndex = originalUrl.lastIndexOf('/')
         if (lastDotIndex <= lastSlashIndex) return originalUrl
-
         val currentExt = originalUrl.substring(lastDotIndex + 1).lowercase().trim()
         val urlWithoutExt = originalUrl.substring(0, lastDotIndex)
-
         if (attempt >= 5 && originalUrl.contains("/movie/")) {
             return originalUrl.replace("/movie/", "/live/").substringBeforeLast('.') + ".ts"
         }
-
-        val fallbacks = listOf("mp4", "mkv", "avi", "ts").filter { it != currentExt }
+        val fallbacks = listOf("mp4", "mkv", "ts", "avi").filter { it != currentExt }
         if (fallbacks.isEmpty()) return originalUrl
-
         val targetExt = fallbacks[(attempt - 2).coerceAtLeast(0) % fallbacks.size]
         return "$urlWithoutExt.$targetExt"
     }
@@ -219,34 +364,51 @@ class AndroidMedia3PlayerEngine(
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(customUa)
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(20_000)
+            .setConnectTimeoutMs(6_500)
+            .setReadTimeoutMs(9_500)
             .setKeepPostFor302Redirects(true)
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
+            .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES)
+            .setTsExtractorTimestampSearchBytes(1500 * TsExtractor.TS_PACKET_SIZE)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
             .setDataSourceFactory(httpDataSourceFactory)
 
-        val fastStartBufferMs = 350
+        val fastStartBufferMs = 250
+        val rebufferStartMs = 800
+        val effectiveMinBufferMs = preset.minBufferMs.coerceAtLeast(fastStartBufferMs + 500)
+        val effectiveMaxBufferMs = preset.maxBufferMs.coerceAtLeast(effectiveMinBufferMs + 2_000)
+
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                preset.minBufferMs,
-                preset.maxBufferMs,
-                fastStartBufferMs,
-                1200
-            )
+            .setBufferDurationsMs(effectiveMinBufferMs, effectiveMaxBufferMs, fastStartBufferMs, rebufferStartMs)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        val renderersFactory = DefaultRenderersFactory(context)
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(pcmDelayProcessor))
+                    .build()
+            }
+        }
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableDecoderFallback(true)
 
+        val shouldEnableTunneling = AetherSettingsStore.state.value.tunneledPlayback && activeAudioDelayOffsetMs == 0
         val trackSelector = DefaultTrackSelector(context).apply {
-            setParameters(
-                buildUponParameters()
-                    .setTunnelingEnabled(AetherSettingsStore.state.value.tunneledPlayback)
-            )
+            setParameters(buildUponParameters().setTunnelingEnabled(shouldEnableTunneling).setPreferredTextLanguage("de"))
         }
+        activeTrackSelector = trackSelector
 
         return ExoPlayer.Builder(context, renderersFactory)
             .setTrackSelector(trackSelector)
@@ -255,6 +417,7 @@ class AndroidMedia3PlayerEngine(
             .build()
             .apply {
                 playWhenReady = true
+                videoScalingMode = if (_videoAspectMode.value == VideoAspectMode.ZOOM) C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                 addListener(playerListener)
             }
     }
@@ -268,13 +431,9 @@ class AndroidMedia3PlayerEngine(
         _currentPositionMs.value = startPositionMs
 
         val prebufferedSlot = synchronized(predictiveRingBuffer) { predictiveRingBuffer[cleanUrl] }
-        val effectivePlayUrl = if (prebufferedSlot != null &&
-            (System.currentTimeMillis() - prebufferedSlot.timestampMs) < 45_000L
-        ) {
+        val effectivePlayUrl = if (prebufferedSlot != null && (System.currentTimeMillis() - prebufferedSlot.timestampMs) < 45_000L) {
             prebufferedSlot.resolvedEdgeUrl
-        } else {
-            cleanUrl
-        }
+        } else cleanUrl
 
         runCatching {
             exoPlayer.setMediaItem(MediaItem.fromUri(effectivePlayUrl), startPositionMs)
@@ -286,10 +445,7 @@ class AndroidMedia3PlayerEngine(
     override fun prebufferAdjacentStreams(prevUrl: String?, nextUrl: String?) {
         predictiveZapJob?.cancel()
         predictiveZapJob = ioScope.launch {
-            val targets = listOfNotNull(
-                prevUrl?.trim()?.takeIf { it.startsWith("http") },
-                nextUrl?.trim()?.takeIf { it.startsWith("http") }
-            )
+            val targets = listOfNotNull(prevUrl?.trim()?.takeIf { it.startsWith("http") }, nextUrl?.trim()?.takeIf { it.startsWith("http") })
             for (targetUrl in targets) {
                 if (!isActive || targetUrl == currentStreamUrl) continue
                 val alreadyWarm = synchronized(predictiveRingBuffer) {
@@ -297,17 +453,14 @@ class AndroidMedia3PlayerEngine(
                     existing != null && (System.currentTimeMillis() - existing.timestampMs) < 30_000L
                 }
                 if (alreadyWarm) continue
-
                 prebufferSemaphore.withPermit {
                     runCatching {
                         val conn = (URL(targetUrl).openConnection() as? HttpURLConnection) ?: return@runCatching
                         conn.instanceFollowRedirects = true
-                        conn.connectTimeout = 3_500
-                        conn.readTimeout = 3_500
+                        conn.connectTimeout = 3_500; conn.readTimeout = 3_500
                         conn.setRequestProperty("User-Agent", IPTV_USER_AGENT)
                         conn.setRequestProperty("Range", "bytes=0-${PREBUFFER_BYTES_LIMIT - 1}")
                         conn.connect()
-
                         val resolvedUrl = conn.url?.toString()?.takeIf { it.startsWith("http") } ?: targetUrl
                         val buffer = ByteArray(PREBUFFER_BYTES_LIMIT)
                         var totalRead = 0
@@ -319,18 +472,12 @@ class AndroidMedia3PlayerEngine(
                             }
                         }
                         conn.disconnect()
-
                         if (totalRead > 0) {
                             synchronized(predictiveRingBuffer) {
                                 if (predictiveRingBuffer.size >= MAX_RING_BUFFER_SLOTS) {
                                     predictiveRingBuffer.keys.firstOrNull()?.let { predictiveRingBuffer.remove(it) }
                                 }
-                                predictiveRingBuffer[targetUrl] = PrebufferedStreamSlot(
-                                    originalUrl = targetUrl,
-                                    resolvedEdgeUrl = resolvedUrl,
-                                    headerChunkBytes = buffer.copyOf(totalRead),
-                                    timestampMs = System.currentTimeMillis()
-                                )
+                                predictiveRingBuffer[targetUrl] = PrebufferedStreamSlot(targetUrl, resolvedUrl, buffer.copyOf(totalRead), System.currentTimeMillis())
                             }
                         }
                     }
@@ -339,35 +486,52 @@ class AndroidMedia3PlayerEngine(
         }
     }
 
-    override fun applySavedStreamTrackMemory(
-        preferredAudioId: String?,
-        preferredSubtitleId: String?,
-        audioDelayMs: Int
-    ) {
+    override fun applySavedStreamTrackMemory(preferredAudioId: String?, preferredSubtitleId: String?, audioDelayMs: Int) {
         pendingPreferredAudioId = preferredAudioId
         pendingPreferredSubtitleId = preferredSubtitleId
         setAudioDelayOffsetMs(audioDelayMs)
 
         val currentAudio = _audioTracks.value
         if (!preferredAudioId.isNullOrBlank() && currentAudio.isNotEmpty()) {
-            currentAudio.firstOrNull { it.trackId == preferredAudioId || it.languageLabel == preferredAudioId }?.let {
-                selectAudioTrack(it)
-            }
+            currentAudio.firstOrNull { it.trackId == preferredAudioId || it.languageLabel == preferredAudioId }?.let { selectAudioTrack(it) }
         }
         val currentSubs = _subtitleTracks.value
         if (preferredSubtitleId != null && currentSubs.isNotEmpty()) {
-            if (preferredSubtitleId == "OFF") {
-                selectSubtitleTrack(null)
-            } else {
-                currentSubs.firstOrNull { it.trackId == preferredSubtitleId || it.languageLabel == preferredSubtitleId }?.let {
-                    selectSubtitleTrack(it)
-                }
-            }
+            if (preferredSubtitleId == "OFF") selectSubtitleTrack(null)
+            else currentSubs.firstOrNull { it.trackId == preferredSubtitleId || it.languageLabel == preferredSubtitleId }?.let { selectSubtitleTrack(it) }
         }
     }
 
     override fun setAudioDelayOffsetMs(delayMs: Int) {
-        activeAudioDelayOffsetMs = delayMs.coerceIn(-5000, 5000)
+        val clamped = delayMs.coerceIn(-5000, 5000)
+        val previousDelay = activeAudioDelayOffsetMs
+        activeAudioDelayOffsetMs = clamped
+        _audioDelayOffsetMs.value = clamped
+        _techMetadata.update { it.copy(activeAudioDelayMs = clamped) }
+        pcmDelayProcessor.setDelayOffsetMs(clamped)
+
+        val selector = activeTrackSelector
+        if (selector != null) {
+            val wantTunneling = AetherSettingsStore.state.value.tunneledPlayback && clamped == 0
+            val wasTunneling = AetherSettingsStore.state.value.tunneledPlayback && previousDelay == 0
+            if (wantTunneling != wasTunneling) {
+                runCatching { selector.setParameters(selector.buildUponParameters().setTunnelingEnabled(wantTunneling)) }
+            }
+        }
+    }
+
+    override fun cycleVideoAspectMode(): VideoAspectMode {
+        val modes = VideoAspectMode.entries
+        val nextMode = modes[(modes.indexOf(_videoAspectMode.value) + 1) % modes.size]
+        setVideoAspectMode(nextMode)
+        return nextMode
+    }
+
+    override fun setVideoAspectMode(mode: VideoAspectMode) {
+        _videoAspectMode.value = mode
+        runCatching {
+            exoPlayer.videoScalingMode = if (mode == VideoAspectMode.ZOOM) C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING else C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        }
     }
 
     override fun seekRelativeMs(offsetMs: Long) {
@@ -375,8 +539,7 @@ class AndroidMedia3PlayerEngine(
             val duration = exoPlayer.duration
             if (duration <= 0L || duration == C.TIME_UNSET) return
             val target = (exoPlayer.currentPosition + offsetMs).coerceIn(0L, duration)
-            exoPlayer.seekTo(target)
-            _currentPositionMs.value = target
+            exoPlayer.seekTo(target); _currentPositionMs.value = target
         }
     }
 
@@ -384,8 +547,7 @@ class AndroidMedia3PlayerEngine(
         runCatching {
             val duration = exoPlayer.duration
             val target = if (duration > 0L && duration != C.TIME_UNSET) positionMs.coerceIn(0L, duration) else positionMs.coerceAtLeast(0L)
-            exoPlayer.seekTo(target)
-            _currentPositionMs.value = target
+            exoPlayer.seekTo(target); _currentPositionMs.value = target
         }
     }
 
@@ -401,29 +563,39 @@ class AndroidMedia3PlayerEngine(
     private fun startProgressTicker() {
         progressTickerJob?.cancel()
         progressTickerJob = scope.launch {
-            while (isActive && exoPlayer.isPlaying) {
-                updatePlaybackDurations()
-                delay(500L)
-            }
+            while (isActive && exoPlayer.isPlaying) { updatePlaybackDurations(); delay(500L) }
         }
     }
 
-    private fun stopProgressTicker() {
-        progressTickerJob?.cancel()
-        progressTickerJob = null
-    }
+    private fun stopProgressTicker() { progressTickerJob?.cancel(); progressTickerJob = null }
 
     override fun applyBufferPreset(preset: StreamBufferPreset) {
         if (currentPreset == preset) return
         currentPreset = preset
         val activeUrl = currentStreamUrl
         val currentPos = runCatching { exoPlayer.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
-
         stopProgressTicker()
         runCatching { exoPlayer.release() }
         exoPlayer = buildExoPlayer(preset)
-        if (activeUrl != null) {
-            playStream(activeUrl, currentPos)
+        if (activeUrl != null) playStream(activeUrl, currentPos)
+    }
+
+    override fun selectVideoTrack(option: TrackOption?) {
+        runCatching {
+            if (option == null || option.groupIndex < 0) {
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_VIDEO).clearVideoSizeConstraints().build()
+                return
+            }
+            val groups = exoPlayer.currentTracks.groups
+            if (option.groupIndex in groups.indices) {
+                val group = groups[option.groupIndex].mediaTrackGroup
+                if (option.trackIndex in 0 until group.length) {
+                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                        .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                        .setOverrideForType(TrackSelectionOverride(group, option.trackIndex)).build()
+                }
+            }
         }
     }
 
@@ -433,10 +605,12 @@ class AndroidMedia3PlayerEngine(
             val groups = exoPlayer.currentTracks.groups
             if (option.groupIndex in groups.indices) {
                 val group = groups[option.groupIndex].mediaTrackGroup
-                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                    .buildUpon()
-                    .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
-                    .build()
+                if (option.trackIndex in 0 until group.length) {
+                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                        .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                        .setOverrideForType(TrackSelectionOverride(group, option.trackIndex)).build()
+                }
             }
         }
     }
@@ -444,35 +618,42 @@ class AndroidMedia3PlayerEngine(
     override fun selectSubtitleTrack(option: TrackOption?) {
         pendingPreferredSubtitleId = option?.trackId ?: "OFF"
         runCatching {
-            if (option == null) {
-                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                    .buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                    .build()
+            if (option == null || option.groupIndex < 0) {
+                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                 return
             }
             val groups = exoPlayer.currentTracks.groups
             if (option.groupIndex in groups.indices) {
                 val group = groups[option.groupIndex].mediaTrackGroup
-                exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
-                    .buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                    .setOverrideForType(TrackSelectionOverride(group, option.trackIndex))
-                    .build()
+                if (option.trackIndex in 0 until group.length) {
+                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setOverrideForType(TrackSelectionOverride(group, option.trackIndex)).build()
+                }
             }
         }
     }
 
     private fun extractTracksAndTechSpecs(tracks: Tracks) {
+        val videoList = mutableListOf<TrackOption>()
         val audioList = mutableListOf<TrackOption>()
         val subtitleList = mutableListOf<TrackOption>()
 
         tracks.groups.forEachIndexed { groupIdx, group ->
             when (group.type) {
                 C.TRACK_TYPE_VIDEO -> {
-                    if (group.isSelected && group.length > 0) {
-                        val format = group.getTrackFormat(0)
+                    for (trackIdx in 0 until group.length) {
+                        val format = group.getTrackFormat(trackIdx)
                         val res = when {
+                            format.height >= 2160 -> "4K UHD (${format.width}x${format.height})"
+                            format.height >= 1080 -> "1080p FHD (${format.width}x${format.height})"
+                            format.height >= 720 -> "720p HD (${format.width}x${format.height})"
+                            format.height > 0 -> "${format.height}p (${format.width}x${format.height})"
+                            else -> "Video Spur ${videoList.size + 1}"
+                        }
+                        val shortRes = when {
                             format.height >= 2160 -> "4K UHD"
                             format.height >= 1080 -> "1080p FHD"
                             format.height >= 720 -> "720p HD"
@@ -482,44 +663,62 @@ class AndroidMedia3PlayerEngine(
                         val rawFps = if (format.frameRate > 0f) format.frameRate else 50.0f
                         val fps = "${rawFps.roundToInt()} FPS"
                         val vCodec = format.sampleMimeType?.substringAfter("/")?.uppercase() ?: "H.264"
-                        _techMetadata.update {
-                            it.copy(resolutionLabel = res, fpsLabel = fps, videoCodec = vCodec, detectedFrameRate = rawFps)
+                        val isSelected = group.isTrackSelected(trackIdx)
+                        if (isSelected) {
+                            _techMetadata.update { it.copy(resolutionLabel = shortRes, fpsLabel = fps, videoCodec = vCodec, detectedFrameRate = rawFps) }
+                            applyDynamicHardwareAfrIfEnabled(rawFps)
                         }
-                        applyDynamicHardwareAfrIfEnabled(rawFps)
+                        val bitrateMbps = if (format.bitrate > 0) " • ${String.format("%.1f", format.bitrate / 1_000_000f)} Mbit/s" else ""
+                        val tId = format.id ?: "v_${groupIdx}_${trackIdx}_${format.height}"
+                        videoList.add(TrackOption(groupIdx, trackIdx, "$res ($fps$bitrateMbps)", vCodec, isSelected, tId))
                     }
                 }
                 C.TRACK_TYPE_AUDIO -> {
                     for (trackIdx in 0 until group.length) {
                         val format: Format = group.getTrackFormat(trackIdx)
-                        val lang = format.language?.uppercase() ?: "SPUR ${audioList.size + 1}"
-                        val label = format.label ?: lang
+                        val langCode = format.language?.uppercase()?.takeIf { it != "UND" }
+                        val baseLabel = format.label?.takeIf { it.isNotBlank() }
+                        val displayLang = when {
+                            !baseLabel.isNullOrBlank() && !langCode.isNullOrBlank() && !baseLabel.uppercase().contains(langCode) -> "$langCode - $baseLabel"
+                            !baseLabel.isNullOrBlank() -> baseLabel
+                            !langCode.isNullOrBlank() -> langCode
+                            else -> "Tonspur ${audioList.size + 1}"
+                        }
                         val aCodec = format.sampleMimeType?.substringAfter("/")?.uppercase() ?: "AAC"
+                        val chLabel = when (format.channelCount) { 6 -> "5.1"; 8 -> "7.1"; 2 -> "Stereo"; 1 -> "Mono"; else -> "" }
+                        val fullCodec = if (chLabel.isNotEmpty()) "$aCodec $chLabel" else aCodec
                         val selected = group.isTrackSelected(trackIdx)
-                        if (selected) _techMetadata.update { it.copy(audioCodec = aCodec) }
-                        val tId = format.id ?: "${groupIdx}_${trackIdx}_${label}_$aCodec"
-                        audioList.add(TrackOption(groupIdx, trackIdx, label, aCodec, selected, tId))
+                        if (selected) _techMetadata.update { it.copy(audioCodec = fullCodec) }
+                        val tId = format.id ?: "${groupIdx}_${trackIdx}_${displayLang}_$aCodec"
+                        audioList.add(TrackOption(groupIdx, trackIdx, displayLang, fullCodec, selected, tId))
                     }
                 }
                 C.TRACK_TYPE_TEXT -> {
                     for (trackIdx in 0 until group.length) {
                         val format: Format = group.getTrackFormat(trackIdx)
-                        val lang = format.language?.uppercase() ?: "UNTERTITEL ${subtitleList.size + 1}"
-                        val label = format.label ?: lang
-                        val tId = format.id ?: "${groupIdx}_${trackIdx}_$label"
-                        subtitleList.add(TrackOption(groupIdx, trackIdx, label, "SUB", group.isTrackSelected(trackIdx), tId))
+                        val langCode = format.language?.uppercase()?.takeIf { it != "UND" }
+                        val baseLabel = format.label?.takeIf { it.isNotBlank() }
+                        val displaySub = when {
+                            !baseLabel.isNullOrBlank() && !langCode.isNullOrBlank() && !baseLabel.uppercase().contains(langCode) -> "$langCode - $baseLabel"
+                            !baseLabel.isNullOrBlank() -> baseLabel
+                            !langCode.isNullOrBlank() -> langCode
+                            else -> "Untertitel ${subtitleList.size + 1}"
+                        }
+                        val subMime = format.sampleMimeType?.substringAfter("/")?.uppercase() ?: "SUB"
+                        val tId = format.id ?: "${groupIdx}_${trackIdx}_$displaySub"
+                        subtitleList.add(TrackOption(groupIdx, trackIdx, displaySub, subMime, group.isTrackSelected(trackIdx), tId))
                     }
                 }
             }
         }
+        _videoTracks.value = videoList
         _audioTracks.value = audioList
         _subtitleTracks.value = subtitleList
 
         val savedAudioId = pendingPreferredAudioId
         if (!savedAudioId.isNullOrBlank()) {
             val matchedAudio = audioList.firstOrNull { it.trackId == savedAudioId || it.languageLabel == savedAudioId }
-            if (matchedAudio != null && !matchedAudio.isSelected) {
-                selectAudioTrack(matchedAudio)
-            }
+            if (matchedAudio != null && !matchedAudio.isSelected) selectAudioTrack(matchedAudio)
         }
         val savedSubId = pendingPreferredSubtitleId
         if (!savedSubId.isNullOrBlank()) {
@@ -527,9 +726,7 @@ class AndroidMedia3PlayerEngine(
                 if (subtitleList.any { it.isSelected }) selectSubtitleTrack(null)
             } else {
                 val matchedSub = subtitleList.firstOrNull { it.trackId == savedSubId || it.languageLabel == savedSubId }
-                if (matchedSub != null && !matchedSub.isSelected) {
-                    selectSubtitleTrack(matchedSub)
-                }
+                if (matchedSub != null && !matchedSub.isSelected) selectSubtitleTrack(matchedSub)
             }
         }
     }
@@ -538,16 +735,9 @@ class AndroidMedia3PlayerEngine(
         if (streamFps <= 0f) return
         val afrMode = AetherSettingsStore.state.value.autoFrameRateMode
         if (afrMode == "Aus") return
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            runCatching {
-                activeSurfaceViewRef?.holder?.surface?.takeIf { it.isValid }?.setFrameRate(
-                    streamFps,
-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
-                )
-            }
+            runCatching { activeSurfaceViewRef?.holder?.surface?.takeIf { it.isValid }?.setFrameRate(streamFps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) }
         }
-
         val targetHz = when {
             abs(streamFps - 25.0f) < 0.5f -> 50.0f
             abs(streamFps - 29.97f) < 0.05f -> 59.94f
@@ -555,7 +745,6 @@ class AndroidMedia3PlayerEngine(
             else -> streamFps
         }
         if (abs(lastAppliedAfrHz - targetHz) < 0.05f) return
-
         afrSwitchJob?.cancel()
         afrSwitchJob = scope.launch {
             if (afrMode.contains("Verzögerung")) delay(1200L)
@@ -565,16 +754,8 @@ class AndroidMedia3PlayerEngine(
                 val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return@runCatching
                 val display = displayManager.getDisplay(Display.DEFAULT_DISPLAY) ?: return@runCatching
                 val currentMode = display.mode ?: return@runCatching
-
-                val sameResolutionModes = display.supportedModes.filter {
-                    it.physicalWidth == currentMode.physicalWidth && it.physicalHeight == currentMode.physicalHeight
-                }
-                val bestMode = sameResolutionModes.minByOrNull { mode ->
-                    val directDiff = abs(mode.refreshRate - targetHz)
-                    val harmonicDiff = abs(mode.refreshRate - (streamFps * 2f))
-                    minOf(directDiff, harmonicDiff)
-                } ?: return@runCatching
-
+                val sameResolutionModes = display.supportedModes.filter { it.physicalWidth == currentMode.physicalWidth && it.physicalHeight == currentMode.physicalHeight }
+                val bestMode = sameResolutionModes.minByOrNull { mode -> minOf(abs(mode.refreshRate - targetHz), abs(mode.refreshRate - (streamFps * 2f))) } ?: return@runCatching
                 if (abs(bestMode.refreshRate - targetHz) <= 0.15f && window.attributes.preferredDisplayModeId != bestMode.modeId) {
                     val params = window.attributes
                     params.preferredDisplayModeId = bestMode.modeId
@@ -594,21 +775,9 @@ class AndroidMedia3PlayerEngine(
         return null
     }
 
-    override fun pause() {
-        stopProgressTicker()
-        runCatching { exoPlayer.pause() }
-    }
-
-    override fun resume() {
-        runCatching { exoPlayer.play() }
-    }
-
-    override fun release() {
-        stopProgressTicker()
-        predictiveZapJob?.cancel()
-        afrSwitchJob?.cancel()
-        runCatching { exoPlayer.release() }
-    }
+    override fun pause() { stopProgressTicker(); runCatching { exoPlayer.pause() } }
+    override fun resume() { runCatching { exoPlayer.play() } }
+    override fun release() { stopProgressTicker(); predictiveZapJob?.cancel(); afrSwitchJob?.cancel(); runCatching { exoPlayer.release() } }
 }
 
 @OptIn(UnstableApi::class)
@@ -618,20 +787,44 @@ actual fun AetherVideoSurface(
     modifier: Modifier
 ) {
     val androidEngine = engine as? AndroidMedia3PlayerEngine ?: return
+    val currentAspectMode by androidEngine.videoAspectMode.collectAsState()
+
+    val targetResizeMode = when (currentAspectMode) {
+        VideoAspectMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        VideoAspectMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+        VideoAspectMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        VideoAspectMode.FIXED_WIDTH -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
+        VideoAspectMode.FIXED_HEIGHT -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT
+    }
+
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
             PlayerView(ctx).apply {
                 useController = false
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                setKeepContentOnPlayerReset(true)
+                resizeMode = targetResizeMode
                 player = androidEngine.exoPlayer
+                subtitleView?.apply {
+                    setApplyEmbeddedStyles(true)
+                    setApplyEmbeddedFontSizes(true)
+                    setStyle(
+                        CaptionStyleCompat(
+                            AndroidColor.WHITE,
+                            AndroidColor.argb(180, 7, 9, 14),
+                            AndroidColor.TRANSPARENT,
+                            CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,
+                            AndroidColor.BLACK,
+                            Typeface.DEFAULT_BOLD
+                        )
+                    )
+                }
                 androidEngine.activeSurfaceViewRef = videoSurfaceView as? SurfaceView
             }
         },
         update = { view ->
-            if (view.player !== androidEngine.exoPlayer) {
-                view.player = androidEngine.exoPlayer
-            }
+            if (view.player !== androidEngine.exoPlayer) view.player = androidEngine.exoPlayer
+            if (view.resizeMode != targetResizeMode) view.resizeMode = targetResizeMode
             androidEngine.activeSurfaceViewRef = view.videoSurfaceView as? SurfaceView
         }
     )
