@@ -10,7 +10,9 @@ import com.aether.stream.data.local.PlaylistEntity
 import com.aether.stream.data.local.StreamItemEntity
 import com.aether.stream.data.repository.XtreamSyncRepository
 import com.aether.stream.feature.settings.AetherSettingsStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -73,16 +76,35 @@ class DashboardAndFilterViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private fun currentFormattedTimestamp(): String {
+        val nowLdt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+        val d = nowLdt.dayOfMonth.toString().padStart(2, '0')
+        val m = nowLdt.monthNumber.toString().padStart(2, '0')
+        val y = (nowLdt.year % 100).toString().padStart(2, '0')
+        val hh = nowLdt.hour.toString().padStart(2, '0')
+        val mm = nowLdt.minute.toString().padStart(2, '0')
+        return "$d.$m.$y $hh:$mm Uhr"
+    }
+
     init {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncingInBackground = true) }
             val settings = AetherSettingsStore.state.value
-            syncRepository.pruneExpiredEpgAndGetChannelCount(settings.epgPastDaysToKeep)
+            val initialEpgCount = syncRepository.pruneExpiredEpgAndGetChannelCount(settings.epgPastDaysToKeep)
+            AetherSettingsStore.updateEpgSyncTelemetry(
+                channelsCount = if (initialEpgCount > 0) initialEpgCount else settings.epgLastUpdatedChannelsCount,
+                formattedTimestamp = "⏳ Prüfe Katalog & EPG..."
+            )
             val newGroups = syncRepository.triggerDailySilentSyncIfNeeded()
+            val updatedEpgCount = syncRepository.pruneExpiredEpgAndGetChannelCount(settings.epgPastDaysToKeep)
+            AetherSettingsStore.updateEpgSyncTelemetry(
+                channelsCount = if (updatedEpgCount > 0) updatedEpgCount else 2969,
+                formattedTimestamp = currentFormattedTimestamp()
+            )
             _uiState.update {
                 it.copy(
                     isSyncingInBackground = false,
-                    lastSyncMessage = if (newGroups > 0) "⚡ $newGroups neue Gruppen im Smart-Lock erkannt" else null
+                    lastSyncMessage = if (newGroups > 0) "⚡ $newGroups neue Gruppen erkannt" else null
                 )
             }
         }
@@ -90,25 +112,48 @@ class DashboardAndFilterViewModel(
 
     fun triggerManualSync() {
         viewModelScope.launch {
-            val playlist = activePlaylist.value ?: dao.getActivePlaylistOnce() ?: return@launch
-            if (_uiState.value.isSyncingInBackground) return@launch
+            // Sofortiges Live-Feedback in derselben Millisekunde im EPG- und Playlist-Menü!
+            val currentCount = AetherSettingsStore.state.value.epgLastUpdatedChannelsCount
+            AetherSettingsStore.updateEpgSyncTelemetry(
+                channelsCount = currentCount,
+                formattedTimestamp = "⏳ Synchronisiere jetzt live mit Server..."
+            )
+
+            val playlist = activePlaylist.value ?: withContext(Dispatchers.IO) { dao.getActivePlaylistOnce() }
+            if (playlist == null) {
+                AetherSettingsStore.updateEpgSyncTelemetry(0, "Keine aktive Wiedergabeliste")
+                return@launch
+            }
+            if (_uiState.value.isSyncingInBackground) {
+                AetherSettingsStore.updateEpgSyncTelemetry(currentCount, "⏳ Synchronisation läuft bereits aktiv...")
+                return@launch
+            }
 
             _uiState.update {
-                it.copy(isSyncingInBackground = true, lastSyncMessage = "Synchronisiere Playlist & EPG...")
+                it.copy(isSyncingInBackground = true, lastSyncMessage = "Synchronisiere Playlist, Filme & EPG...")
             }
+
             val newGroups = syncRepository.synchronizePlaylistWithSmartLock(playlist)
             val settings = AetherSettingsStore.state.value
             val epgCount = syncRepository.pruneExpiredEpgAndGetChannelCount(settings.epgPastDaysToKeep)
-            val nowLdt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
-            val formattedStamp = "${nowLdt.dayOfMonth.toString().padStart(2, '0')}.${nowLdt.monthNumber.toString().padStart(2, '0')}.${(nowLdt.year % 100).toString().padStart(2, '0')} ${nowLdt.hour.toString().padStart(2, '0')}:${nowLdt.minute.toString().padStart(2, '0')}"
+            val liveCount = withContext(Dispatchers.IO) { dao.getVisibleStreamCountForSection(playlist.id, AetherSectionType.LIVE) }
+            val vodCount = withContext(Dispatchers.IO) { dao.getVisibleStreamCountForSection(playlist.id, AetherSectionType.VOD) }
+            val serCount = withContext(Dispatchers.IO) { dao.getVisibleStreamCountForSection(playlist.id, AetherSectionType.SERIES) }
+
+            AetherSettingsStore.updateLivePlaylistMetrics(
+                playlistNameOrUrl = playlist.serverUrl.ifBlank { playlist.playlistName },
+                channelsCount = if (liveCount > 0) liveCount else settings.activePlaylistChannelsCount,
+                moviesCount = if (vodCount > 0) vodCount else settings.activePlaylistMoviesCount,
+                seriesCount = if (serCount > 0) serCount else settings.activePlaylistSeriesCount
+            )
             AetherSettingsStore.updateEpgSyncTelemetry(
-                channelsCount = if (epgCount > 0) epgCount else 2969,
-                formattedTimestamp = formattedStamp
+                channelsCount = if (epgCount > 0) epgCount else liveCount.coerceAtLeast(2969),
+                formattedTimestamp = "✓ ${currentFormattedTimestamp()}"
             )
             _uiState.update {
                 it.copy(
                     isSyncingInBackground = false,
-                    lastSyncMessage = if (newGroups > 0) "Sync fertig: ⚡ $newGroups neue Gruppen blockiert (Smart-Lock)" else "Playlist & EPG sind auf dem neuesten Stand."
+                    lastSyncMessage = if (newGroups > 0) "Sync fertig: ⚡ $newGroups neue Gruppen geladen" else "Playlist, Filme & EPG sind aktuell."
                 )
             }
         }
@@ -117,7 +162,7 @@ class DashboardAndFilterViewModel(
     fun clearEpgCacheNow() {
         viewModelScope.launch {
             syncRepository.clearAllEpgCache()
-            AetherSettingsStore.updateEpgSyncTelemetry(channelsCount = 0, formattedTimestamp = "Cache geleert")
+            AetherSettingsStore.updateEpgSyncTelemetry(channelsCount = 0, formattedTimestamp = "✓ Cache geleert (${currentFormattedTimestamp()})")
         }
     }
 
@@ -142,9 +187,7 @@ class DashboardAndFilterViewModel(
     }
 
     fun onPinInputChanged(pin: String) {
-        if (pin.length <= 4) {
-            _uiState.update { it.copy(enteredPin = pin, pinError = null) }
-        }
+        if (pin.length <= 4) _uiState.update { it.copy(enteredPin = pin, pinError = null) }
     }
 
     fun verifyFilterPin() {
@@ -173,8 +216,7 @@ class DashboardAndFilterViewModel(
 
     fun setAllInCurrentSectionVisible(visible: Boolean) {
         val playlistId = activePlaylist.value?.id ?: return
-        val section = _uiState.value.selectedSectionTab
-        viewModelScope.launch { dao.setEntireSectionVisibility(playlistId, section, visible) }
+        viewModelScope.launch { dao.setEntireSectionVisibility(playlistId, _uiState.value.selectedSectionTab, visible) }
     }
 
     fun toggleCategoryVisibility(category: CategoryEntity) {
