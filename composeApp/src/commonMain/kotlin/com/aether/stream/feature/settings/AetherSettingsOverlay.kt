@@ -1,36 +1,13 @@
 package com.aether.stream.feature.settings
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -39,12 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,30 +25,14 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
-
-// ====================================================================================================
-// 1. OBSIDIAN NEON GLASS DESIGN TOKENS (TIVIMATE PARITY)
-// ====================================================================================================
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
 
 private val ObsidianBlack = Color(0xFF07090E)
 private val ObsidianSurface = Color(0xFF0D131F)
@@ -88,25 +44,9 @@ private val TextPrimary = Color(0xFFF8FAFC)
 private val TextSecondary = Color(0xFF94A3B8)
 private val FocusedTextPrimary = Color(0xFF07090E)
 private val FocusedTextSecondary = Color(0xFF334155)
-private val GlassBorderCyan = CyberCyan.copy(alpha = 0.35f)
 
-// ====================================================================================================
-// 2. FOCUS HANDSHAKE & ENGINE HOT-SWAP CONTRACTS
-// ====================================================================================================
+enum class AetherSettingsFocusOrigin { NONE, COCKPIT_NAV_RAIL, FULLSCREEN_HUD_CAROUSEL }
 
-/**
- * Tracks which cockpit zone opened the 340.dp Settings Overlay so D-Pad focus
- * is deterministically returned to the exact origin on dismiss.
- */
-enum class AetherSettingsFocusOrigin {
-    NONE,
-    COCKPIT_NAV_RAIL,
-    FULLSCREEN_HUD_CAROUSEL
-}
-
-/**
- * Deterministic Media3 LoadControl buffer configuration mapped from Bild 8 ("Puffergröße").
- */
 data class AetherBufferLoadControlSpec(
     val presetLabel: String,
     val enginePresetKey: String,
@@ -116,9 +56,6 @@ data class AetherBufferLoadControlSpec(
     val bufferForPlaybackAfterRebufferMs: Int
 )
 
-/**
- * Hot-Swap runtime payload emitted to AndroidMedia3PlayerEngine whenever playback settings change.
- */
 data class AetherMedia3HotSwapConfig(
     val bufferSpec: AetherBufferLoadControlSpec,
     val tunneledPlaybackEnabled: Boolean,
@@ -131,32 +68,21 @@ data class AetherMedia3HotSwapConfig(
     val userAgent: String
 )
 
-// ====================================================================================================
-// 3. REACTIVE SETTINGS STATE MODEL & NON-BLOCKING STORE
-// ====================================================================================================
-
 data class AetherSettingsState(
-    // Focus Handshake State
     val isDrawerOpen: Boolean = false,
     val focusOrigin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.NONE,
-
-    // Bild 2 & 3: Allgemein
     val autoStartOnBoot: Boolean = false,
     val autoWakeFromSleep: Boolean = false,
     val openLastChannelOnStart: Boolean = true,
     val autoPipOnHome: Boolean = true,
     val confirmExitWithDoubleBack: Boolean = true,
-    val userAgent: String = "VLC",
+    val userAgent: String = "TiviMate/5.1.0 (Linux; Android 11)",
     val udpProxy: String = "Nicht festgelegt",
     val lastBackupStatus: String = "Noch keine Sicherung erstellt",
-
-    // Bild 4: Wiedergabelisten (Live Telemetry Binding)
     val activePlaylistName: String = "line.trxdnscloud.ru",
     val activePlaylistChannelsCount: Int = 18957,
     val activePlaylistMoviesCount: Int = 72231,
     val activePlaylistSeriesCount: Int = 13926,
-
-    // Bild 5 & 6: EPG
     val epgSourcesSummary: String = "Primäre Xtream XMLTV-Quelle aktiv",
     val epgPastDaysToKeep: Int = 7,
     val epgStoreProgramDescriptions: Boolean = true,
@@ -164,30 +90,24 @@ data class AetherSettingsState(
     val epgUpdateOnAppStart: Boolean = true,
     val epgUpdateOnPlaylistChange: Boolean = true,
     val epgLastUpdatedChannelsCount: Int = 2969,
-    val epgLastUpdatedTimestamp: String = "29.10.26 16:49",
-
-    // Bild 7: Optik
-    val language: String = "System",
+    val epgLastUpdatedTimestamp: String = "Bereit zur Synchronisation",
+    val language: String = "Deutsch",
     val fontSizePreset: String = "Mittel",
-    val colorTheme: String = "Dunkel • Blau",
+    val colorTheme: String = "Obsidian • Cyan",
     val uiTransparencyPercent: Int = 50,
     val epgTimelineSlotMinutes: Int = 30,
     val playerHudTimeoutSeconds: Int = 5,
     val showChannelNumbersInGroups: Boolean = true,
     val logoPriority: String = "Wiedergabeliste bevorzugen",
-
-    // Bild 8 & 9: Wiedergabe
     val bufferSizePreset: String = "Klein",
     val audioDecoder: String = "Hardware",
-    val videoDecoder: String = "Software",
+    val videoDecoder: String = "Hardware",
     val autoFrameRateMode: String = "Einschalten",
     val defaultSurroundAudioTrack: Boolean = false,
     val audioPassthrough: Boolean = false,
     val tunneledPlayback: Boolean = false,
     val amlogicFix: String = "Aus",
     val useExternalPlayer: String = "Nein",
-
-    // Bild 10: Fernbedienung
     val remoteEpgDpadMode: String = "Standard (Kanalliste & Zeitachse)",
     val remotePlayerOkAction: String = "HUD Transport-Leiste öffnen",
     val useRwFfPauseForSeeking: Boolean = true,
@@ -195,8 +115,6 @@ data class AetherSettingsState(
     val useLeftRightForSeeking: Boolean = false,
     val useLeftToRewindLiveStream: Boolean = false,
     val useDownUpForCatchupSeeking: Boolean = false,
-
-    // Bild 11: Kindersicherung
     val parentalControlEnabled: Boolean = false,
     val parentalPinCode: String = "0000",
     val parentalPinInputMethod: String = "Sammler",
@@ -206,378 +124,95 @@ data class AetherSettingsState(
     val parentalPinForPlaylists: Boolean = false,
     val parentalPinForEpg: Boolean = false,
     val parentalPinForChannelOptions: Boolean = false,
-
-    // Bild 12: Sonstiges
     val keepSearchHistory: Boolean = true,
     val reminderLeadTimeMinutes: Int = 2,
     val recordingPaddingMinutes: Int = 5,
     val vodAutoResumePlayback: Boolean = true,
-
-    // Bild 1: Über
     val autoCheckForUpdates: Boolean = true
 )
 
-/**
- * Thread-safe, zero-latency reactive store for all Aether settings.
- * Mutates UI state immediately (<1ms) and dispatches persistence writes asynchronously.
- */
 object AetherSettingsStore {
     private val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var debounceSaveJob: Job? = null
     private var asyncPersistenceHandler: (suspend (AetherSettingsState) -> Unit)? = null
-
     private val _state = MutableStateFlow(AetherSettingsState())
     val state: StateFlow<AetherSettingsState> = _state.asStateFlow()
 
-    fun registerPersistenceHandler(handler: suspend (AetherSettingsState) -> Unit) {
-        asyncPersistenceHandler = handler
-    }
+    fun registerPersistenceHandler(handler: suspend (AetherSettingsState) -> Unit) { asyncPersistenceHandler = handler }
+    fun hydrateInitialState(loadedState: AetherSettingsState) { _state.value = loadedState }
+    fun openDrawer(origin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL) { _state.update { it.copy(isDrawerOpen = true, focusOrigin = origin) } }
+    fun closeDrawer(): AetherSettingsFocusOrigin { val o = _state.value.focusOrigin; _state.update { it.copy(isDrawerOpen = false, focusOrigin = AetherSettingsFocusOrigin.NONE) }; return o }
 
-    fun hydrateInitialState(loadedState: AetherSettingsState) {
-        _state.value = loadedState
-    }
-
-    /**
-     * Opens the Settings Overlay and records the exact D-Pad origin (Zone 1 Rail vs. Fullscreen HUD).
-     */
-    fun openDrawer(origin: AetherSettingsFocusOrigin = AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL) {
-        _state.update { current ->
-            current.copy(isDrawerOpen = true, focusOrigin = origin)
-        }
-    }
-
-    /**
-     * Closes the Settings Overlay and returns the recorded origin for deterministic focus restoration.
-     */
-    fun closeDrawer(): AetherSettingsFocusOrigin {
-        val origin = _state.value.focusOrigin
-        _state.update { current ->
-            current.copy(isDrawerOpen = false, focusOrigin = AetherSettingsFocusOrigin.NONE)
-        }
-        return origin
-    }
-
-    /**
-     * Sanitizes raw Xtream / M3U server URLs into clean TiviMate hostnames (e.g. "line.trxdnscloud.ru")
-     * and updates live channel, movie, and series counters for Bild 4.
-     */
-    fun updateLivePlaylistMetrics(
-        playlistNameOrUrl: String,
-        channelsCount: Int,
-        moviesCount: Int,
-        seriesCount: Int
-    ) {
-        val cleanHost = sanitizePlaylistHostname(playlistNameOrUrl)
-        _state.update { current ->
-            val resolvedName = cleanHost.ifBlank { current.activePlaylistName }
-            if (
-                current.activePlaylistName == resolvedName &&
-                current.activePlaylistChannelsCount == channelsCount &&
-                current.activePlaylistMoviesCount == moviesCount &&
-                current.activePlaylistSeriesCount == seriesCount
-            ) {
-                current
-            } else {
-                current.copy(
-                    activePlaylistName = resolvedName,
-                    activePlaylistChannelsCount = channelsCount.coerceAtLeast(0),
-                    activePlaylistMoviesCount = moviesCount.coerceAtLeast(0),
-                    activePlaylistSeriesCount = seriesCount.coerceAtLeast(0)
-                )
-            }
+    fun updateLivePlaylistMetrics(playlistNameOrUrl: String, channelsCount: Int, moviesCount: Int, seriesCount: Int) {
+        val cleanHost = playlistNameOrUrl.trim().removePrefix("https://").removePrefix("http://").removePrefix("rtmp://").substringBefore('/').substringBefore('?').substringBefore(':').trim()
+        _state.update { cur ->
+            val name = cleanHost.ifBlank { cur.activePlaylistName }
+            cur.copy(activePlaylistName = name, activePlaylistChannelsCount = channelsCount.coerceAtLeast(0), activePlaylistMoviesCount = moviesCount.coerceAtLeast(0), activePlaylistSeriesCount = seriesCount.coerceAtLeast(0))
         }
     }
 
     fun updateEpgSyncTelemetry(channelsCount: Int, formattedTimestamp: String) {
-        updateState { current ->
-            current.copy(
-                epgLastUpdatedChannelsCount = channelsCount.coerceAtLeast(0),
-                epgLastUpdatedTimestamp = formattedTimestamp.ifBlank { current.epgLastUpdatedTimestamp }
-            )
-        }
+        updateState { cur -> cur.copy(epgLastUpdatedChannelsCount = channelsCount.coerceAtLeast(0), epgLastUpdatedTimestamp = formattedTimestamp.ifBlank { cur.epgLastUpdatedTimestamp }) }
     }
 
-    fun resolveBufferSpec(presetName: String = _state.value.bufferSizePreset): AetherBufferLoadControlSpec {
-        return when (presetName) {
-            "Keine" -> AetherBufferLoadControlSpec(
-                presetLabel = "Keine",
-                enginePresetKey = "ULTRA_LOW_LATENCY",
-                minBufferMs = 1_500,
-                maxBufferMs = 4_000,
-                bufferForPlaybackMs = 400,
-                bufferForPlaybackAfterRebufferMs = 1_000
-            )
-            "Klein" -> AetherBufferLoadControlSpec(
-                presetLabel = "Klein",
-                enginePresetKey = "LOW_LATENCY",
-                minBufferMs = 4_000,
-                maxBufferMs = 12_000,
-                bufferForPlaybackMs = 800,
-                bufferForPlaybackAfterRebufferMs = 2_000
-            )
-            "Mittel" -> AetherBufferLoadControlSpec(
-                presetLabel = "Mittel",
-                enginePresetKey = "BALANCED",
-                minBufferMs = 12_000,
-                maxBufferMs = 30_000,
-                bufferForPlaybackMs = 1_500,
-                bufferForPlaybackAfterRebufferMs = 3_000
-            )
-            "Groß" -> AetherBufferLoadControlSpec(
-                presetLabel = "Groß",
-                enginePresetKey = "HIGH_STABILITY",
-                minBufferMs = 25_000,
-                maxBufferMs = 50_000,
-                bufferForPlaybackMs = 2_500,
-                bufferForPlaybackAfterRebufferMs = 5_000
-            )
-            else -> AetherBufferLoadControlSpec(
-                presetLabel = "Sehr groß",
-                enginePresetKey = "MAX_RESILIENCE",
-                minBufferMs = 40_000,
-                maxBufferMs = 80_000,
-                bufferForPlaybackMs = 3_500,
-                bufferForPlaybackAfterRebufferMs = 7_000
-            )
-        }
+    fun resolveBufferSpec(presetName: String = _state.value.bufferSizePreset): AetherBufferLoadControlSpec = when (presetName) {
+        "Keine" -> AetherBufferLoadControlSpec("Keine", "ULTRA_LOW_LATENCY", 1_500, 4_000, 250, 800)
+        "Klein" -> AetherBufferLoadControlSpec("Klein", "LOW_LATENCY", 4_000, 12_000, 250, 1_000)
+        "Mittel" -> AetherBufferLoadControlSpec("Mittel", "BALANCED", 12_000, 30_000, 500, 1_500)
+        "Groß" -> AetherBufferLoadControlSpec("Groß", "HIGH_STABILITY", 25_000, 50_000, 1_000, 2_500)
+        else -> AetherBufferLoadControlSpec("Sehr groß", "MAX_RESILIENCE", 40_000, 80_000, 1_500, 3_500)
     }
 
-    fun buildHotSwapConfig(state: AetherSettingsState = _state.value): AetherMedia3HotSwapConfig {
-        return AetherMedia3HotSwapConfig(
-            bufferSpec = resolveBufferSpec(state.bufferSizePreset),
-            tunneledPlaybackEnabled = state.tunneledPlayback,
-            audioPassthroughEnabled = state.audioPassthrough,
-            preferSurroundAudio = state.defaultSurroundAudioTrack,
-            autoFrameRateMode = state.autoFrameRateMode,
-            hardwareAudioDecoder = state.audioDecoder == "Hardware",
-            hardwareVideoDecoder = state.videoDecoder == "Hardware",
-            amlogicFixEnabled = state.amlogicFix == "Ein",
-            userAgent = state.userAgent
-        )
-    }
+    fun buildHotSwapConfig(s: AetherSettingsState = _state.value) = AetherMedia3HotSwapConfig(
+        bufferSpec = resolveBufferSpec(s.bufferSizePreset), tunneledPlaybackEnabled = s.tunneledPlayback, audioPassthroughEnabled = s.audioPassthrough,
+        preferSurroundAudio = s.defaultSurroundAudioTrack, autoFrameRateMode = s.autoFrameRateMode, hardwareAudioDecoder = s.audioDecoder == "Hardware",
+        hardwareVideoDecoder = s.videoDecoder == "Hardware", amlogicFixEnabled = s.amlogicFix == "Ein", userAgent = s.userAgent
+    )
 
     fun updateState(transform: (AetherSettingsState) -> AetherSettingsState) {
-        val updated = _state.updateAndGet(transform)
-        scheduleBackgroundFlush(updated)
-    }
-
-    private fun sanitizePlaylistHostname(rawInput: String): String {
-        val trimmed = rawInput.trim()
-        if (trimmed.isEmpty()) return ""
-        val withoutScheme = trimmed
-            .removePrefix("https://")
-            .removePrefix("http://")
-            .removePrefix("rtmp://")
-        val hostWithPort = withoutScheme.substringBefore('/').substringBefore('?')
-        return hostWithPort.substringBefore(':').trim()
-    }
-
-    private fun <T> MutableStateFlow<T>.updateAndGet(function: (T) -> T): T {
-        while (true) {
-            val prevValue = value
-            val nextValue = function(prevValue)
-            if (compareAndSet(prevValue, nextValue)) {
-                return nextValue
-            }
-        }
-    }
-
-    private fun scheduleBackgroundFlush(snapshot: AetherSettingsState) {
+        _state.update(transform)
+        val snapshot = _state.value
         val handler = asyncPersistenceHandler ?: return
         debounceSaveJob?.cancel()
-        debounceSaveJob = storeScope.launch {
-            delay(250L)
-            runCatching { handler(snapshot) }
-        }
+        debounceSaveJob = storeScope.launch { delay(250L); runCatching { handler(snapshot) } }
     }
 }
 
-// ====================================================================================================
-// 4. REACTIVE TELEMETRY & MEDIA3 HOT-SWAP BINDING COMPOSABLES (FOR AETHERAPP.KT)
-// ====================================================================================================
-
-/**
- * Drop-in Side-Effect for AetherApp.kt:
- * Automatically pushes live repository counts (Channels, VOD, Series) and EPG telemetry into
- * AetherSettingsStore so Bild 4 and Bild 6 are always 100% synchronized.
- */
 @Composable
-fun BindAetherSettingsLiveTelemetry(
-    activePlaylistUrlOrName: String,
-    liveChannelsCount: Int,
-    vodMoviesCount: Int,
-    seriesCount: Int,
-    epgUpdatedChannelsCount: Int = -1,
-    epgUpdatedTimestamp: String = ""
-) {
-    LaunchedEffect(activePlaylistUrlOrName, liveChannelsCount, vodMoviesCount, seriesCount) {
-        AetherSettingsStore.updateLivePlaylistMetrics(
-            playlistNameOrUrl = activePlaylistUrlOrName,
-            channelsCount = liveChannelsCount,
-            moviesCount = vodMoviesCount,
-            seriesCount = seriesCount
-        )
-    }
-
-    LaunchedEffect(epgUpdatedChannelsCount, epgUpdatedTimestamp) {
-        if (epgUpdatedChannelsCount >= 0 && epgUpdatedTimestamp.isNotBlank()) {
-            AetherSettingsStore.updateEpgSyncTelemetry(
-                channelsCount = epgUpdatedChannelsCount,
-                formattedTimestamp = epgUpdatedTimestamp
-            )
-        }
-    }
+fun BindAetherSettingsLiveTelemetry(activePlaylistUrlOrName: String, liveChannelsCount: Int, vodMoviesCount: Int, seriesCount: Int, epgUpdatedChannelsCount: Int = -1, epgUpdatedTimestamp: String = "") {
+    LaunchedEffect(activePlaylistUrlOrName, liveChannelsCount, vodMoviesCount, seriesCount) { AetherSettingsStore.updateLivePlaylistMetrics(activePlaylistUrlOrName, liveChannelsCount, vodMoviesCount, seriesCount) }
+    LaunchedEffect(epgUpdatedChannelsCount, epgUpdatedTimestamp) { if (epgUpdatedChannelsCount >= 0 && epgUpdatedTimestamp.isNotBlank()) AetherSettingsStore.updateEpgSyncTelemetry(epgUpdatedChannelsCount, epgUpdatedTimestamp) }
 }
 
-/**
- * Drop-in Side-Effect for AetherApp.kt:
- * Observes Playback & General parameters and fires immediate hot-swap updates to AndroidMedia3PlayerEngine
- * without restarting the app or interrupting the surface lifecycle.
- */
 @Composable
-fun BindAetherEngineParameters(
-    onApplyHotSwapConfig: (AetherMedia3HotSwapConfig) -> Unit
-) {
+fun BindAetherEngineParameters(onApplyHotSwapConfig: (AetherMedia3HotSwapConfig) -> Unit) {
     val state by AetherSettingsStore.state.collectAsState()
-
-    val hotSwapConfig = remember(
-        state.bufferSizePreset,
-        state.tunneledPlayback,
-        state.audioPassthrough,
-        state.defaultSurroundAudioTrack,
-        state.autoFrameRateMode,
-        state.audioDecoder,
-        state.videoDecoder,
-        state.amlogicFix,
-        state.userAgent
-    ) {
-        AetherSettingsStore.buildHotSwapConfig(state)
-    }
-
-    LaunchedEffect(hotSwapConfig) {
-        onApplyHotSwapConfig(hotSwapConfig)
-    }
+    val cfg = remember(state.bufferSizePreset, state.tunneledPlayback, state.audioPassthrough, state.defaultSurroundAudioTrack, state.autoFrameRateMode, state.audioDecoder, state.videoDecoder, state.amlogicFix, state.userAgent) { AetherSettingsStore.buildHotSwapConfig(state) }
+    LaunchedEffect(cfg) { onApplyHotSwapConfig(cfg) }
 }
-
-// ====================================================================================================
-// 5. CASCADING NAVIGATION STATE MACHINE (3-LEVEL LIFO BACKSTACK)
-// ====================================================================================================
 
 enum class SettingsPageId(val title: String, val level: Int) {
-    // Level 1: Root
-    ROOT("Einstellungen", 1),
-
-    // Level 2: Main Categories (Bild 1)
-    GENERAL("Allgemein", 2),
-    PLAYLISTS("Wiedergabelisten", 2),
-    EPG("EPG", 2),
-    APPEARANCE("Optik", 2),
-    PLAYBACK("Wiedergabe", 2),
-    REMOTE("Fernbedienung", 2),
-    PARENTAL("Kindersicherung", 2),
-    MISC("Sonstiges", 2),
-    ABOUT("Über", 2),
-
-    // Level 2+: Sub-Menus inside Optik, Fernbedienung, Sonstiges
-    APPEARANCE_EPG("Optik • EPG", 3),
-    APPEARANCE_PLAYER("Optik • Player", 3),
-    APPEARANCE_GROUPS("Optik • Gruppen", 3),
-    APPEARANCE_LOGOS("Optik • Logos", 3),
-    REMOTE_EPG("Fernbedienung • EPG", 3),
-    REMOTE_PLAYER("Fernbedienung • Player", 3),
-    MISC_SEARCH("Sonstiges • Suchen", 3),
-    MISC_REMINDERS("Sonstiges • Erinnerungen", 3),
-    MISC_RECORDING("Sonstiges • Aufnahme", 3),
-    MISC_VOD("Sonstiges • VOD", 3),
-
-    // Level 3: Inline Value Selectors
-    PICKER_USER_AGENT("User-Agent", 3),
-    PICKER_UDP_PROXY("UDP Proxy (Adresse:Port)", 3),
-    PICKER_EPG_PAST_DAYS("Vergangene Tage behalten", 3),
-    PICKER_EPG_INTERVAL("Aktualisierungsintervall", 3),
-    PICKER_LANGUAGE("Sprache", 3),
-    PICKER_FONT_SIZE("Schriftgröße", 3),
-    PICKER_COLOR_THEME("Farbthema", 3),
-    PICKER_UI_TRANSPARENCY("Transparenz der UI (%)", 3),
-    PICKER_BUFFER_SIZE("Puffergröße", 3),
-    PICKER_AUDIO_DECODER("Audio Decoder", 3),
-    PICKER_VIDEO_DECODER("Video Decoder", 3),
-    PICKER_AFR("Framerate-Anpassung (AFR)", 3),
-    PICKER_AMLOGIC_FIX("Amlogic Fix", 3),
-    PICKER_EXTERNAL_PLAYER("Externen Player nutzen", 3),
-    PICKER_PIN_METHOD("PIN Eingabemethode", 3),
-    PICKER_PIN_TIMEOUT("PIN Sperrzeitraum", 3)
+    ROOT("Einstellungen", 1), GENERAL("Allgemein", 2), PLAYLISTS("Wiedergabelisten", 2), EPG("EPG", 2), APPEARANCE("Optik", 2),
+    PLAYBACK("Wiedergabe", 2), REMOTE("Fernbedienung", 2), PARENTAL("Kindersicherung", 2), MISC("Sonstiges", 2), ABOUT("Über", 2),
+    APPEARANCE_EPG("Optik • EPG", 3), APPEARANCE_PLAYER("Optik • Player", 3), APPEARANCE_GROUPS("Optik • Gruppen", 3), APPEARANCE_LOGOS("Optik • Logos", 3),
+    REMOTE_EPG("Fernbedienung • EPG", 3), REMOTE_PLAYER("Fernbedienung • Player", 3), MISC_SEARCH("Sonstiges • Suchen", 3), MISC_REMINDERS("Sonstiges • Erinnerungen", 3),
+    MISC_RECORDING("Sonstiges • Aufnahme", 3), MISC_VOD("Sonstiges • VOD", 3), PICKER_USER_AGENT("User-Agent", 3), PICKER_UDP_PROXY("UDP Proxy (Adresse:Port)", 3),
+    PICKER_EPG_PAST_DAYS("Vergangene Tage behalten", 3), PICKER_EPG_INTERVAL("Aktualisierungsintervall", 3), PICKER_LANGUAGE("Sprache", 3), PICKER_FONT_SIZE("Schriftgröße", 3),
+    PICKER_COLOR_THEME("Farbthema", 3), PICKER_UI_TRANSPARENCY("Transparenz der UI (%)", 3), PICKER_BUFFER_SIZE("Puffergröße", 3), PICKER_AUDIO_DECODER("Audio Decoder", 3),
+    PICKER_VIDEO_DECODER("Video Decoder", 3), PICKER_AFR("Framerate-Anpassung (AFR)", 3), PICKER_AMLOGIC_FIX("Amlogic Fix", 3), PICKER_EXTERNAL_PLAYER("Externen Player nutzen", 3),
+    PICKER_PIN_METHOD("PIN Eingabemethode", 3), PICKER_PIN_TIMEOUT("PIN Sperrzeitraum", 3)
 }
 
-/**
- * Immutable stack frame preserving exact D-Pad focus and scroll coordinates across levels.
- */
-data class SettingsNavFrame(
-    val pageId: SettingsPageId,
-    val focusedRowIndex: Int = 0,
-    val firstVisibleItemIndex: Int = 0,
-    val firstVisibleScrollOffset: Int = 0
-)
-
-// ====================================================================================================
-// 6. UNIFIED 5-ROW TEMPLATE MODEL
-// ====================================================================================================
+data class SettingsNavFrame(val pageId: SettingsPageId, val focusedRowIndex: Int = 0, val firstVisibleItemIndex: Int = 0, val firstVisibleScrollOffset: Int = 0)
 
 sealed interface SettingsRowModel {
-    val id: String
-    val isFocusable: Boolean
-
-    data class NavRow(
-        override val id: String,
-        val title: String,
-        val subtitle: String? = null,
-        val targetPage: SettingsPageId
-    ) : SettingsRowModel {
-        override val isFocusable: Boolean = true
-    }
-
-    data class ToggleRow(
-        override val id: String,
-        val title: String,
-        val subtitle: String? = null,
-        val checked: Boolean,
-        val onToggle: (Boolean) -> Unit
-    ) : SettingsRowModel {
-        override val isFocusable: Boolean = true
-    }
-
-    data class ValueRow(
-        override val id: String,
-        val title: String,
-        val valueText: String,
-        val targetPickerPage: SettingsPageId? = null,
-        val onClick: (() -> Unit)? = null
-    ) : SettingsRowModel {
-        override val isFocusable: Boolean = true
-    }
-
-    data class SectionHeader(
-        override val id: String,
-        val title: String
-    ) : SettingsRowModel {
-        override val isFocusable: Boolean = false
-    }
-
-    data class StatusOrOptionRow(
-        override val id: String,
-        val title: String,
-        val subtitle: String? = null,
-        val isSelectedOption: Boolean = false,
-        val showCheckmarkCircle: Boolean = false,
-        val onClick: () -> Unit
-    ) : SettingsRowModel {
-        override val isFocusable: Boolean = true
-    }
+    val id: String; val isFocusable: Boolean
+    data class NavRow(override val id: String, val title: String, val subtitle: String? = null, val targetPage: SettingsPageId) : SettingsRowModel { override val isFocusable = true }
+    data class ToggleRow(override val id: String, val title: String, val subtitle: String? = null, val checked: Boolean, val onToggle: (Boolean) -> Unit) : SettingsRowModel { override val isFocusable = true }
+    data class ValueRow(override val id: String, val title: String, val valueText: String, val targetPickerPage: SettingsPageId? = null, val onClick: (() -> Unit)? = null) : SettingsRowModel { override val isFocusable = true }
+    data class SectionHeader(override val id: String, val title: String) : SettingsRowModel { override val isFocusable = false }
+    data class StatusOrOptionRow(override val id: String, val title: String, val subtitle: String? = null, val isSelectedOption: Boolean = false, val showCheckmarkCircle: Boolean = false, val onClick: () -> Unit) : SettingsRowModel { override val isFocusable = true }
 }
-
-// ====================================================================================================
-// 7. ROOT COMPOSABLE: AETHER 340.DP RIGHT-SIDE SETTINGS OVERLAY (Z-INDEX 60F)
-// ====================================================================================================
 
 @Composable
 fun AetherSettingsOverlay(
@@ -599,378 +234,141 @@ fun AetherSettingsOverlay(
 ) {
     val settingsState by AetherSettingsStore.state.collectAsState()
     val drawerFocusRequester = remember { FocusRequester() }
+    val navStack = remember { mutableStateListOf(SettingsNavFrame(SettingsPageId.ROOT, 0)) }
 
-    // LIFO Backstack with Focus Memory
-    val navStack = remember {
-        mutableStateListOf(SettingsNavFrame(pageId = SettingsPageId.ROOT, focusedRowIndex = 0))
+    val themeAccentColor = remember(settingsState.colorTheme) {
+        when (settingsState.colorTheme) {
+            "Dunkel • Blau" -> ElectricBlue
+            "Schwarz • Smaragd" -> Color(0xFF10B981)
+            "Dunkel • Bernstein" -> Color(0xFFF59E0B)
+            else -> CyberCyan
+        }
+    }
+    val fontDeltaSp = remember(settingsState.fontSizePreset) {
+        when (settingsState.fontSizePreset) { "Klein" -> -1; "Groß" -> 2; "Sehr groß" -> 4; else -> 0 }
     }
 
-    // Complete Focus Handshake: Dismisses overlay and routes D-Pad focus back to exact caller
-    fun executeDismissWithFocusHandshake() {
-        val resolvedOrigin = if (settingsState.focusOrigin != AetherSettingsFocusOrigin.NONE) {
-            AetherSettingsStore.closeDrawer()
-        } else {
-            focusOrigin
-        }
+    fun executeDismiss() {
+        val origin = if (settingsState.focusOrigin != AetherSettingsFocusOrigin.NONE) AetherSettingsStore.closeDrawer() else focusOrigin
         onDismiss()
-        onRestoreFocusToOrigin?.invoke(resolvedOrigin)
-        when (resolvedOrigin) {
-            AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL -> {
-                runCatching { hudCarouselFocusRequester?.requestFocus() }
-            }
-            AetherSettingsFocusOrigin.COCKPIT_NAV_RAIL,
-            AetherSettingsFocusOrigin.NONE -> {
-                runCatching { navRailFocusRequester?.requestFocus() }
-            }
+        onRestoreFocusToOrigin?.invoke(origin)
+        when (origin) {
+            AetherSettingsFocusOrigin.FULLSCREEN_HUD_CAROUSEL -> runCatching { hudCarouselFocusRequester?.requestFocus() }
+            else -> runCatching { navRailFocusRequester?.requestFocus() }
         }
     }
 
     LaunchedEffect(isVisible) {
         if (isVisible) {
-            if (navStack.isEmpty()) {
-                navStack.add(SettingsNavFrame(pageId = SettingsPageId.ROOT, focusedRowIndex = 0))
-            }
-            delay(40L)
-            runCatching { drawerFocusRequester.requestFocus() }
-        } else {
-            navStack.clear()
-            navStack.add(SettingsNavFrame(pageId = SettingsPageId.ROOT, focusedRowIndex = 0))
-        }
+            if (navStack.isEmpty()) navStack.add(SettingsNavFrame(SettingsPageId.ROOT, 0))
+            delay(40L); runCatching { drawerFocusRequester.requestFocus() }
+        } else { navStack.clear(); navStack.add(SettingsNavFrame(SettingsPageId.ROOT, 0)) }
     }
 
     val currentFrame = navStack.lastOrNull() ?: SettingsNavFrame(SettingsPageId.ROOT, 0)
     val currentRows = remember(currentFrame.pageId, settingsState) {
         buildRowsForPage(
-            pageId = currentFrame.pageId,
-            state = settingsState,
-            onNavigate = { targetPage ->
-                navStack.add(SettingsNavFrame(pageId = targetPage, focusedRowIndex = 0))
-            },
-            onPopStack = {
-                if (navStack.size > 1) {
-                    navStack.removeAt(navStack.lastIndex)
-                }
-            },
-            onAddPlaylistRequested = {
-                executeDismissWithFocusHandshake()
-                onAddPlaylistRequested()
-            },
-            onRefreshPlaylistsRequested = onRefreshPlaylistsRequested,
-            onRefreshEpgRequested = onRefreshEpgRequested,
-            onClearEpgRequested = onClearEpgRequested,
-            onBufferPresetChanged = onBufferPresetChanged,
-            onUserAgentChanged = onUserAgentChanged,
-            onTunneledPlaybackChanged = onTunneledPlaybackChanged,
-            onAudioPassthroughChanged = onAudioPassthroughChanged
+            pageId = currentFrame.pageId, state = settingsState,
+            onPopStack = { if (navStack.size > 1) navStack.removeAt(navStack.lastIndex) },
+            onAddPlaylistRequested = { executeDismiss(); onAddPlaylistRequested() },
+            onRefreshPlaylistsRequested = onRefreshPlaylistsRequested, onRefreshEpgRequested = onRefreshEpgRequested,
+            onClearEpgRequested = onClearEpgRequested, onBufferPresetChanged = onBufferPresetChanged,
+            onUserAgentChanged = onUserAgentChanged, onTunneledPlaybackChanged = onTunneledPlaybackChanged, onAudioPassthroughChanged = onAudioPassthroughChanged
         )
     }
 
-    // Dynamic UI Transparency from Bild 7 ("Transparenz der Benutzeroberfläche (%)")
     val dynamicSurfaceAlpha = remember(settingsState.uiTransparencyPercent) {
-        val transparencyFraction = (settingsState.uiTransparencyPercent.coerceIn(0, 80)) / 100f
-        (0.96f - (transparencyFraction * 0.38f)).coerceIn(0.62f, 0.96f)
+        (0.96f - ((settingsState.uiTransparencyPercent.coerceIn(0, 80) / 100f) * 0.42f)).coerceIn(0.55f, 0.96f)
     }
 
     AnimatedVisibility(
         visible = isVisible,
-        enter = fadeIn(animationSpec = tween(180)) +
-            slideInHorizontally(
-                animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-                initialOffsetX = { fullWidth -> fullWidth }
-            ),
-        exit = slideOutHorizontally(
-            animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
-            targetOffsetX = { fullWidth -> fullWidth }
-        ) + fadeOut(animationSpec = tween(160)),
-        modifier = modifier
-            .fillMaxSize()
-            .zIndex(60f) // Anchored strictly at Z-Layer 60f above Cockpit & Modals
+        enter = fadeIn(tween(180)) + slideInHorizontally(tween(240, easing = FastOutSlowInEasing)) { it },
+        exit = slideOutHorizontally(tween(200, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(160)),
+        modifier = modifier.fillMaxSize().zIndex(60f)
     ) {
-        val listState = rememberLazyListState(
-            initialFirstVisibleItemIndex = currentFrame.firstVisibleItemIndex,
-            initialFirstVisibleItemScrollOffset = currentFrame.firstVisibleScrollOffset
-        )
-
-        LaunchedEffect(currentFrame.pageId) {
-            runCatching {
-                listState.scrollToItem(
-                    index = currentFrame.firstVisibleItemIndex,
-                    scrollOffset = currentFrame.firstVisibleScrollOffset
-                )
-            }
-        }
-
+        val listState = rememberLazyListState(currentFrame.firstVisibleItemIndex, currentFrame.firstVisibleScrollOffset)
+        LaunchedEffect(currentFrame.pageId) { runCatching { listState.scrollToItem(currentFrame.firstVisibleItemIndex, currentFrame.firstVisibleScrollOffset) } }
         LaunchedEffect(currentFrame.focusedRowIndex, currentFrame.pageId) {
-            val targetIdx = currentFrame.focusedRowIndex.coerceIn(0, (currentRows.size - 1).coerceAtLeast(0))
-            val layoutInfo = listState.layoutInfo
-            val visibleItems = layoutInfo.visibleItemsInfo
-            val isCurrentlyVisible = visibleItems.any { item ->
-                item.index == targetIdx &&
-                    item.offset >= layoutInfo.viewportStartOffset &&
-                    (item.offset + item.size) <= layoutInfo.viewportEndOffset
-            }
-            if (!isCurrentlyVisible && currentRows.isNotEmpty()) {
-                runCatching {
-                    listState.animateScrollToItem(index = targetIdx)
-                }
-            }
+            val idx = currentFrame.focusedRowIndex.coerceIn(0, (currentRows.size - 1).coerceAtLeast(0))
+            val info = listState.layoutInfo
+            val vis = info.visibleItemsInfo.any { it.index == idx && it.offset >= info.viewportStartOffset && (it.offset + it.size) <= info.viewportEndOffset }
+            if (!vis && currentRows.isNotEmpty()) runCatching { listState.animateScrollToItem(idx) }
         }
 
-        fun updateCurrentFrameFocus(newFocusIndex: Int) {
+        fun updateFocus(newIdx: Int) {
             if (navStack.isNotEmpty()) {
-                val topIndex = navStack.lastIndex
-                val topFrame = navStack[topIndex]
-                navStack[topIndex] = topFrame.copy(
-                    focusedRowIndex = newFocusIndex,
-                    firstVisibleItemIndex = listState.firstVisibleItemIndex,
-                    firstVisibleScrollOffset = listState.firstVisibleItemScrollOffset
-                )
+                val top = navStack.lastIndex
+                navStack[top] = navStack[top].copy(focusedRowIndex = newIdx, firstVisibleItemIndex = listState.firstVisibleItemIndex, firstVisibleScrollOffset = listState.firstVisibleItemScrollOffset)
             }
         }
 
-        fun pushPageWithFocusMemory(targetPage: SettingsPageId) {
+        fun pushPage(target: SettingsPageId) {
             if (navStack.isNotEmpty()) {
-                val topIndex = navStack.lastIndex
-                val topFrame = navStack[topIndex]
-                navStack[topIndex] = topFrame.copy(
-                    firstVisibleItemIndex = listState.firstVisibleItemIndex,
-                    firstVisibleScrollOffset = listState.firstVisibleItemScrollOffset
-                )
+                val top = navStack.lastIndex
+                navStack[top] = navStack[top].copy(firstVisibleItemIndex = listState.firstVisibleItemIndex, firstVisibleScrollOffset = listState.firstVisibleItemScrollOffset)
             }
-            val targetRows = buildRowsForPage(
-                pageId = targetPage,
-                state = settingsState,
-                onNavigate = {},
-                onPopStack = {},
-                onAddPlaylistRequested = onAddPlaylistRequested,
-                onRefreshPlaylistsRequested = onRefreshPlaylistsRequested,
-                onRefreshEpgRequested = onRefreshEpgRequested,
-                onClearEpgRequested = onClearEpgRequested,
-                onBufferPresetChanged = onBufferPresetChanged,
-                onUserAgentChanged = onUserAgentChanged,
-                onTunneledPlaybackChanged = onTunneledPlaybackChanged,
-                onAudioPassthroughChanged = onAudioPassthroughChanged
-            )
-            val preselectedIdx = targetRows.indexOfFirst {
-                it is SettingsRowModel.StatusOrOptionRow && it.isSelectedOption
-            }.let { found ->
-                if (found >= 0) found else targetRows.indexOfFirst { it.isFocusable }.coerceAtLeast(0)
-            }
-            navStack.add(
-                SettingsNavFrame(
-                    pageId = targetPage,
-                    focusedRowIndex = preselectedIdx,
-                    firstVisibleItemIndex = (preselectedIdx - 2).coerceAtLeast(0)
-                )
-            )
+            val tRows = buildRowsForPage(target, settingsState, {}, onAddPlaylistRequested, onRefreshPlaylistsRequested, onRefreshEpgRequested, onClearEpgRequested, onBufferPresetChanged, onUserAgentChanged, onTunneledPlaybackChanged, onAudioPassthroughChanged)
+            val preIdx = tRows.indexOfFirst { it is SettingsRowModel.StatusOrOptionRow && it.isSelectedOption }.let { if (it >= 0) it else tRows.indexOfFirst { r -> r.isFocusable }.coerceAtLeast(0) }
+            navStack.add(SettingsNavFrame(target, preIdx, (preIdx - 2).coerceAtLeast(0)))
         }
 
-        fun popPageOrDismiss() {
-            if (navStack.size > 1) {
-                navStack.removeAt(navStack.lastIndex)
-            } else {
-                executeDismissWithFocusHandshake()
-            }
-        }
-
-        fun triggerRowAction(row: SettingsRowModel) {
+        fun triggerRow(row: SettingsRowModel) {
             when (row) {
-                is SettingsRowModel.NavRow -> pushPageWithFocusMemory(row.targetPage)
+                is SettingsRowModel.NavRow -> pushPage(row.targetPage)
                 is SettingsRowModel.ToggleRow -> row.onToggle(!row.checked)
-                is SettingsRowModel.ValueRow -> {
-                    if (row.targetPickerPage != null) {
-                        pushPageWithFocusMemory(row.targetPickerPage)
-                    } else {
-                        row.onClick?.invoke()
-                    }
-                }
+                is SettingsRowModel.ValueRow -> if (row.targetPickerPage != null) pushPage(row.targetPickerPage) else row.onClick?.invoke()
                 is SettingsRowModel.StatusOrOptionRow -> row.onClick()
                 is SettingsRowModel.SectionHeader -> Unit
             }
         }
 
-        // Full-Screen Interceptor Scrim (Locks out background zones, aligns 340.dp drawer right)
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(
-                            ObsidianBlack.copy(alpha = 0.25f),
-                            ObsidianBlack.copy(alpha = 0.65f)
-                        )
-                    )
-                )
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { executeDismissWithFocusHandshake() }
-                )
-                .focusRequester(drawerFocusRequester)
-                .focusable()
-                .onPreviewKeyEvent { keyEvent ->
-                    if (keyEvent.type != KeyEventType.KeyDown) {
-                        return@onPreviewKeyEvent true
-                    }
-                    when (keyEvent.key) {
-                        Key.DirectionDown -> {
-                            val nextIdx = findNextFocusableIndex(
-                                rows = currentRows,
-                                currentIndex = currentFrame.focusedRowIndex,
-                                direction = 1
-                            )
-                            updateCurrentFrameFocus(nextIdx)
-                            true
-                        }
-                        Key.DirectionUp -> {
-                            val prevIdx = findNextFocusableIndex(
-                                rows = currentRows,
-                                currentIndex = currentFrame.focusedRowIndex,
-                                direction = -1
-                            )
-                            updateCurrentFrameFocus(prevIdx)
-                            true
-                        }
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                            val activeRow = currentRows.getOrNull(currentFrame.focusedRowIndex)
-                            if (activeRow != null && activeRow.isFocusable) {
-                                triggerRowAction(activeRow)
-                            }
-                            true
-                        }
+            modifier = Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(ObsidianBlack.copy(alpha = 0.25f), ObsidianBlack.copy(alpha = 0.65f))))
+                .clickable(remember { MutableInteractionSource() }, null) { executeDismiss() }
+                .focusRequester(drawerFocusRequester).focusable()
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent true
+                    when (ev.key) {
+                        Key.DirectionDown -> { updateFocus(findNextFocusableIndex(currentRows, currentFrame.focusedRowIndex, 1)); true }
+                        Key.DirectionUp -> { updateFocus(findNextFocusableIndex(currentRows, currentFrame.focusedRowIndex, -1)); true }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { currentRows.getOrNull(currentFrame.focusedRowIndex)?.takeIf { it.isFocusable }?.let { triggerRow(it) }; true }
                         Key.DirectionRight -> {
-                            val activeRow = currentRows.getOrNull(currentFrame.focusedRowIndex)
-                            when (activeRow) {
-                                is SettingsRowModel.NavRow -> pushPageWithFocusMemory(activeRow.targetPage)
-                                is SettingsRowModel.ValueRow -> {
-                                    if (activeRow.targetPickerPage != null) {
-                                        pushPageWithFocusMemory(activeRow.targetPickerPage)
-                                    }
-                                }
+                            when (val r = currentRows.getOrNull(currentFrame.focusedRowIndex)) {
+                                is SettingsRowModel.NavRow -> pushPage(r.targetPage)
+                                is SettingsRowModel.ValueRow -> if (r.targetPickerPage != null) pushPage(r.targetPickerPage)
                                 else -> Unit
                             }
                             true
                         }
-                        Key.DirectionLeft, Key.Back, Key.Escape -> {
-                            popPageOrDismiss()
-                            true
-                        }
+                        Key.DirectionLeft, Key.Back, Key.Escape -> { if (navStack.size > 1) navStack.removeAt(navStack.lastIndex) else executeDismiss(); true }
                         else -> true
                     }
                 },
             contentAlignment = Alignment.CenterEnd
         ) {
-            // 340.dp Right-Aligned Obsidian Neon Glass Drawer
             Surface(
-                modifier = Modifier
-                    .width(340.dp)
-                    .fillMaxHeight()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {}
-                    )
-                    .border(
-                        width = 1.dp,
-                        color = GlassBorderCyan,
-                        shape = RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)
-                    ),
+                modifier = Modifier.width(350.dp).fillMaxHeight().clickable(remember { MutableInteractionSource() }, null) {}.border(1.5.dp, themeAccentColor.copy(alpha = 0.45f), RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)),
                 color = ObsidianSurface.copy(alpha = dynamicSurfaceAlpha),
-                shape = RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp),
-                tonalElevation = 16.dp,
-                shadowElevation = 24.dp
+                shape = RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)
             ) {
-                AnimatedContent(
-                    targetState = currentFrame.pageId,
-                    transitionSpec = {
-                        val isDrillingDown = targetState.level >= initialState.level &&
-                            targetState != SettingsPageId.ROOT
-                        if (isDrillingDown) {
-                            (slideInHorizontally(
-                                animationSpec = tween(210, easing = FastOutSlowInEasing),
-                                initialOffsetX = { fullWidth -> fullWidth / 2 }
-                            ) + fadeIn(tween(180))) togetherWith
-                                (slideOutHorizontally(
-                                    animationSpec = tween(210, easing = FastOutSlowInEasing),
-                                    targetOffsetX = { fullWidth -> -fullWidth / 3 }
-                                ) + fadeOut(tween(150)))
-                        } else {
-                            (slideInHorizontally(
-                                animationSpec = tween(210, easing = FastOutSlowInEasing),
-                                initialOffsetX = { fullWidth -> -fullWidth / 3 }
-                            ) + fadeIn(tween(180))) togetherWith
-                                (slideOutHorizontally(
-                                    animationSpec = tween(210, easing = FastOutSlowInEasing),
-                                    targetOffsetX = { fullWidth -> fullWidth / 2 }
-                                ) + fadeOut(tween(150)))
-                        }
-                    },
-                    label = "AetherSettingsCascadingDrawer"
-                ) { targetPageId ->
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Top Header Bar (Matches TiviMate Blueprints 1-12)
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(ObsidianHeaderSurface.copy(alpha = 0.88f))
-                                .padding(horizontal = 24.dp, vertical = 22.dp)
-                        ) {
+                AnimatedContent(targetState = currentFrame.pageId, label = "SettingsPageAnim") { pageId ->
+                    Column(Modifier.fillMaxSize()) {
+                        Box(Modifier.fillMaxWidth().background(ObsidianHeaderSurface.copy(alpha = 0.90f)).padding(horizontal = 24.dp, vertical = 20.dp)) {
                             Column {
-                                Text(
-                                    text = targetPageId.title,
-                                    color = PureWhite,
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (navStack.size > 1) {
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "◀ Zurück mit Links / Back",
-                                        color = CyberCyan.copy(alpha = 0.8f),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
+                                Text(pageId.title, color = PureWhite, fontSize = (21 + fontDeltaSp).sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (navStack.size > 1) Text("◀ Zurück mit Links / Back", color = themeAccentColor, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                        HorizontalDivider(thickness = 1.dp, color = themeAccentColor.copy(alpha = 0.30f))
+                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp, 12.dp, 12.dp, 28.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            itemsIndexed(currentRows, key = { _, r -> "${pageId.name}_${r.id}" }) { idx, rowModel ->
+                                val focused = (idx == currentFrame.focusedRowIndex) && rowModel.isFocusable
+                                SettingsUnifiedRowItem(rowModel, focused, themeAccentColor, fontDeltaSp) {
+                                    if (rowModel.isFocusable) { updateFocus(idx); triggerRow(rowModel) }
                                 }
                             }
                         }
-
-                        HorizontalDivider(
-                            thickness = 1.dp,
-                            color = GlassBorderCyan.copy(alpha = 0.25f)
-                        )
-
-                        // Scrollable Settings List
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(
-                                start = 12.dp,
-                                end = 12.dp,
-                                top = 12.dp,
-                                bottom = 28.dp
-                            ),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            itemsIndexed(
-                                items = currentRows,
-                                key = { _, row -> "${targetPageId.name}_${row.id}" }
-                            ) { index, rowModel ->
-                                val isRowFocused = (index == currentFrame.focusedRowIndex) && rowModel.isFocusable
-
-                                SettingsUnifiedRowItem(
-                                    row = rowModel,
-                                    isFocused = isRowFocused,
-                                    onRowClick = {
-                                        if (rowModel.isFocusable) {
-                                            updateCurrentFrameFocus(index)
-                                            triggerRowAction(rowModel)
-                                        }
-                                    }
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -978,211 +376,47 @@ fun AetherSettingsOverlay(
     }
 }
 
-// ====================================================================================================
-// 8. DETERMINISTIC FOCUS INDEX TRAVERSAL (HEADER SKIPPING)
-// ====================================================================================================
-
-private fun findNextFocusableIndex(
-    rows: List<SettingsRowModel>,
-    currentIndex: Int,
-    direction: Int
-): Int {
+private fun findNextFocusableIndex(rows: List<SettingsRowModel>, cur: Int, dir: Int): Int {
     if (rows.isEmpty()) return 0
-    var candidate = currentIndex + direction
-    while (candidate in rows.indices) {
-        if (rows[candidate].isFocusable) {
-            return candidate
-        }
-        candidate += direction
-    }
-    return currentIndex.coerceIn(0, rows.lastIndex)
+    var c = cur + dir
+    while (c in rows.indices) { if (rows[c].isFocusable) return c; c += dir }
+    return cur.coerceIn(0, rows.lastIndex)
 }
 
-// ====================================================================================================
-// 9. THE 5-ROW TEMPLATE RENDERER (TIVIMATE WHITE-PILL LAW)
-// ====================================================================================================
-
 @Composable
-private fun SettingsUnifiedRowItem(
-    row: SettingsRowModel,
-    isFocused: Boolean,
-    onRowClick: () -> Unit
-) {
+private fun SettingsUnifiedRowItem(row: SettingsRowModel, isFocused: Boolean, accentColor: Color, fontDelta: Int, onRowClick: () -> Unit) {
     when (row) {
-        is SettingsRowModel.SectionHeader -> {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 4.dp)
-            ) {
-                Text(
-                    text = row.title,
-                    color = CyberCyan,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.2.sp
-                )
+        is SettingsRowModel.SectionHeader -> Box(Modifier.fillMaxWidth().padding(14.dp, 14.dp, 14.dp, 4.dp)) { Text(row.title, color = accentColor, fontSize = (13 + fontDelta).sp, fontWeight = FontWeight.Bold) }
+        is SettingsRowModel.NavRow -> WhitePillFocusContainer(isFocused, onRowClick) { pCol, sCol ->
+            Column(Modifier.weight(1f)) {
+                Text(row.title, color = pCol, fontSize = (15 + fontDelta).sp, fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (!row.subtitle.isNullOrBlank()) Text(row.subtitle, color = sCol, fontSize = (12 + fontDelta).sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
-
-        is SettingsRowModel.NavRow -> {
-            WhitePillFocusContainer(
-                isFocused = isFocused,
-                onClick = onRowClick
-            ) { primaryTextColor, secondaryTextColor ->
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = row.title,
-                        color = primaryTextColor,
-                        fontSize = 15.sp,
-                        fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Medium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (!row.subtitle.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = row.subtitle,
-                            color = secondaryTextColor,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+        is SettingsRowModel.ValueRow -> WhitePillFocusContainer(isFocused, onRowClick) { pCol, sCol ->
+            Column(Modifier.weight(1f)) {
+                Text(row.title, color = pCol, fontSize = (15 + fontDelta).sp, fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium, maxLines = 2)
+                Text(row.valueText, color = if (isFocused) sCol else accentColor.copy(alpha = 0.9f), fontSize = (12 + fontDelta).sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+            }
+        }
+        is SettingsRowModel.ToggleRow -> WhitePillFocusContainer(isFocused, onRowClick) { pCol, sCol ->
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(row.title, color = pCol, fontSize = (15 + fontDelta).sp, fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium)
+                if (!row.subtitle.isNullOrBlank()) Text(row.subtitle, color = sCol, fontSize = (12 + fontDelta).sp)
+            }
+            TiviMatePillSwitch(row.checked, isFocused, accentColor)
+        }
+        is SettingsRowModel.StatusOrOptionRow -> WhitePillFocusContainer(isFocused, onRowClick) { pCol, sCol ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (row.showCheckmarkCircle || row.isSelectedOption) {
+                    Box(Modifier.size(22.dp).clip(CircleShape).background(if (isFocused) FocusedTextPrimary else accentColor.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
+                        Text("✓", color = if (isFocused) PureWhite else accentColor, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                     }
+                    Spacer(Modifier.width(12.dp))
                 }
-            }
-        }
-
-        is SettingsRowModel.ValueRow -> {
-            WhitePillFocusContainer(
-                isFocused = isFocused,
-                onClick = onRowClick
-            ) { primaryTextColor, secondaryTextColor ->
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = row.title,
-                        color = primaryTextColor,
-                        fontSize = 15.sp,
-                        fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Medium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = row.valueText,
-                        color = secondaryTextColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Normal,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-
-        is SettingsRowModel.ToggleRow -> {
-            WhitePillFocusContainer(
-                isFocused = isFocused,
-                onClick = onRowClick
-            ) { primaryTextColor, secondaryTextColor ->
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 12.dp),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = row.title,
-                        color = primaryTextColor,
-                        fontSize = 15.sp,
-                        fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Medium,
-                        lineHeight = 19.sp
-                    )
-                    if (!row.subtitle.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = row.subtitle,
-                            color = secondaryTextColor,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
-                            lineHeight = 15.sp
-                        )
-                    }
-                }
-
-                TiviMatePillSwitch(
-                    checked = row.checked,
-                    isRowFocused = isFocused
-                )
-            }
-        }
-
-        is SettingsRowModel.StatusOrOptionRow -> {
-            WhitePillFocusContainer(
-                isFocused = isFocused,
-                onClick = onRowClick
-            ) { primaryTextColor, secondaryTextColor ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (row.showCheckmarkCircle) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (isFocused) FocusedTextPrimary.copy(alpha = 0.85f)
-                                    else CyberCyan.copy(alpha = 0.2f)
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "✓",
-                                color = if (isFocused) PureWhite else CyberCyan,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(14.dp))
-                    } else if (row.isSelectedOption) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(if (isFocused) FocusedTextPrimary else CyberCyan)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
-
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = row.title,
-                            color = primaryTextColor,
-                            fontSize = 15.sp,
-                            fontWeight = if (isFocused || row.isSelectedOption) FontWeight.SemiBold else FontWeight.Medium
-                        )
-                        if (!row.subtitle.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = row.subtitle,
-                                color = secondaryTextColor,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Normal,
-                                lineHeight = 16.sp
-                            )
-                        }
-                    }
+                Column(Modifier.weight(1f)) {
+                    Text(row.title, color = pCol, fontSize = (15 + fontDelta).sp, fontWeight = if (isFocused || row.isSelectedOption) FontWeight.Bold else FontWeight.Medium)
+                    if (!row.subtitle.isNullOrBlank()) Text(row.subtitle, color = sCol, fontSize = (12 + fontDelta).sp)
                 }
             }
         }
@@ -1190,801 +424,152 @@ private fun SettingsUnifiedRowItem(
 }
 
 @Composable
-private fun WhitePillFocusContainer(
-    isFocused: Boolean,
-    onClick: () -> Unit,
-    content: @Composable androidx.compose.foundation.layout.RowScope.(
-        primaryTextColor: Color,
-        secondaryTextColor: Color
-    ) -> Unit
-) {
-    val backgroundColor by animateColorAsState(
-        targetValue = if (isFocused) PureWhite else Color.Transparent,
-        animationSpec = tween(durationMillis = 120),
-        label = "WhitePillBgAnimation"
-    )
-    val primaryTextColor by animateColorAsState(
-        targetValue = if (isFocused) FocusedTextPrimary else TextPrimary,
-        animationSpec = tween(durationMillis = 120),
-        label = "WhitePillPrimaryTextAnimation"
-    )
-    val secondaryTextColor by animateColorAsState(
-        targetValue = if (isFocused) FocusedTextSecondary else TextSecondary,
-        animationSpec = tween(durationMillis = 120),
-        label = "WhitePillSecondaryTextAnimation"
-    )
-    val rowScale by animateFloatAsState(
-        targetValue = if (isFocused) 1.015f else 1.0f,
-        animationSpec = tween(durationMillis = 120),
-        label = "WhitePillScaleAnimation"
-    )
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = rowScale
-                scaleY = rowScale
-            }
-            .clip(RoundedCornerShape(8.dp))
-            .background(backgroundColor)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        content(primaryTextColor, secondaryTextColor)
-    }
+private fun WhitePillFocusContainer(isFocused: Boolean, onClick: () -> Unit, content: @Composable RowScope.(Color, Color) -> Unit) {
+    val bg by animateColorAsState(if (isFocused) PureWhite else Color.Transparent, tween(110), label = "WBg")
+    val pCol by animateColorAsState(if (isFocused) FocusedTextPrimary else TextPrimary, tween(110), label = "WP")
+    val sCol by animateColorAsState(if (isFocused) FocusedTextSecondary else TextSecondary, tween(110), label = "WS")
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(bg).clickable(remember { MutableInteractionSource() }, null, onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) { content(pCol, sCol) }
 }
 
 @Composable
-private fun TiviMatePillSwitch(
-    checked: Boolean,
-    isRowFocused: Boolean
-) {
-    val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 16.dp else 0.dp,
-        animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
-        label = "SwitchThumbOffset"
-    )
-
-    val trackColor = when {
-        checked && isRowFocused -> ElectricBlue.copy(alpha = 0.45f)
-        checked && !isRowFocused -> ElectricBlue.copy(alpha = 0.55f)
-        !checked && isRowFocused -> Color(0xFFCBD5E1)
-        else -> Color(0xFF475569)
-    }
-
-    val thumbColor = when {
-        checked && isRowFocused -> Color(0xFF0284C7)
-        checked && !isRowFocused -> ElectricBlue
-        !checked && isRowFocused -> Color(0xFF94A3B8)
-        else -> PureWhite
-    }
-
-    Box(
-        modifier = Modifier
-            .width(38.dp)
-            .height(22.dp),
-        contentAlignment = Alignment.CenterStart
-    ) {
-        Box(
-            modifier = Modifier
-                .width(34.dp)
-                .height(14.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .background(trackColor)
-        )
-        Box(
-            modifier = Modifier
-                .offset(x = thumbOffset)
-                .size(20.dp)
-                .clip(CircleShape)
-                .background(thumbColor)
-                .border(
-                    width = 1.dp,
-                    color = if (isRowFocused) Color.Black.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.25f),
-                    shape = CircleShape
-                )
-        )
+private fun TiviMatePillSwitch(checked: Boolean, isRowFocused: Boolean, accentColor: Color) {
+    val off by animateDpAsState(if (checked) 16.dp else 0.dp, tween(140), label = "SwOff")
+    Box(Modifier.width(38.dp).height(22.dp), contentAlignment = Alignment.CenterStart) {
+        Box(Modifier.width(34.dp).height(14.dp).clip(RoundedCornerShape(7.dp)).background(if (checked) accentColor.copy(alpha = 0.5f) else Color(0xFF475569)))
+        Box(Modifier.offset(x = off).size(20.dp).clip(CircleShape).background(if (checked) accentColor else PureWhite))
     }
 }
-
-// ====================================================================================================
-// 10. COMPLETE 12-BLUEPRINT MENU MATRIX BUILDER (LEVEL 1, LEVEL 2, LEVEL 3)
-// ====================================================================================================
 
 private fun buildRowsForPage(
-    pageId: SettingsPageId,
-    state: AetherSettingsState,
-    onNavigate: (SettingsPageId) -> Unit,
-    onPopStack: () -> Unit,
-    onAddPlaylistRequested: () -> Unit,
-    onRefreshPlaylistsRequested: () -> Unit,
-    onRefreshEpgRequested: () -> Unit,
-    onClearEpgRequested: () -> Unit,
-    onBufferPresetChanged: (String) -> Unit,
-    onUserAgentChanged: (String) -> Unit,
-    onTunneledPlaybackChanged: (Boolean) -> Unit,
-    onAudioPassthroughChanged: (Boolean) -> Unit
-): List<SettingsRowModel> {
-    return when (pageId) {
-
-        SettingsPageId.ROOT -> listOf(
-            SettingsRowModel.NavRow("root_general", "Allgemein", targetPage = SettingsPageId.GENERAL),
-            SettingsRowModel.NavRow("root_playlists", "Wiedergabelisten", targetPage = SettingsPageId.PLAYLISTS),
-            SettingsRowModel.NavRow("root_epg", "EPG", targetPage = SettingsPageId.EPG),
-            SettingsRowModel.NavRow("root_appearance", "Optik", targetPage = SettingsPageId.APPEARANCE),
-            SettingsRowModel.NavRow("root_playback", "Wiedergabe", targetPage = SettingsPageId.PLAYBACK),
-            SettingsRowModel.NavRow("root_remote", "Fernbedienung", targetPage = SettingsPageId.REMOTE),
-            SettingsRowModel.NavRow("root_parental", "Kindersicherung", targetPage = SettingsPageId.PARENTAL),
-            SettingsRowModel.NavRow("root_misc", "Sonstiges", targetPage = SettingsPageId.MISC),
-            SettingsRowModel.NavRow("root_about", "Über", targetPage = SettingsPageId.ABOUT)
-        )
-
-        SettingsPageId.GENERAL -> listOf(
-            SettingsRowModel.ToggleRow(
-                id = "gen_boot",
-                title = "Automatisch nach dem booten starten",
-                checked = state.autoStartOnBoot,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(autoStartOnBoot = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "gen_sleep",
-                title = "Automatisch aus dem Sleep Mode starten",
-                subtitle = "Funktioniert nicht auf allen Geräten",
-                checked = state.autoWakeFromSleep,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(autoWakeFromSleep = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "gen_last_channel",
-                title = "Zuletzt angesehenen Sender beim Start anzeigen",
-                checked = state.openLastChannelOnStart,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(openLastChannelOnStart = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "gen_pip_home",
-                title = "Wechsele in den Bild-in-Bild Modus beim drücken des Home Menüs",
-                checked = state.autoPipOnHome,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(autoPipOnHome = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "gen_double_back",
-                title = "Doppelt bestätigen, zum verlassen mit der Zurück-Taste",
-                checked = state.confirmExitWithDoubleBack,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(confirmExitWithDoubleBack = enabled) } }
-            ),
-            SettingsRowModel.ValueRow(
-                id = "gen_user_agent",
-                title = "User-Agent",
-                valueText = state.userAgent,
-                targetPickerPage = SettingsPageId.PICKER_USER_AGENT
-            ),
-            SettingsRowModel.ValueRow(
-                id = "gen_udp_proxy",
-                title = "UDP Proxy (Adresse:Port)",
-                valueText = state.udpProxy,
-                targetPickerPage = SettingsPageId.PICKER_UDP_PROXY
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "gen_backup",
-                title = "Daten sichern",
-                subtitle = state.lastBackupStatus,
-                onClick = {
-                    AetherSettingsStore.updateState {
-                        it.copy(lastBackupStatus = "Lokales Snapshot-Backup erfolgreich gesichert")
-                    }
-                }
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "gen_restore",
-                title = "Daten wiederherstellen",
-                onClick = {
-                    AetherSettingsStore.updateState {
-                        it.copy(lastBackupStatus = "Einstellungen aus letztem Snapshot wiederhergestellt")
-                    }
-                }
-            )
-        )
-
-        SettingsPageId.PLAYLISTS -> listOf(
-            SettingsRowModel.StatusOrOptionRow(
-                id = "pl_active",
-                title = state.activePlaylistName,
-                subtitle = "Kanäle: ${state.activePlaylistChannelsCount}, filme ${state.activePlaylistMoviesCount}, serien: ${state.activePlaylistSeriesCount}",
-                showCheckmarkCircle = true,
-                onClick = onRefreshPlaylistsRequested
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "pl_add",
-                title = "Hinzufügen",
-                onClick = onAddPlaylistRequested
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "pl_refresh_all",
-                title = "Aktualisiere alle Wiedergabelisten",
-                onClick = onRefreshPlaylistsRequested
-            )
-        )
-
-        SettingsPageId.EPG -> listOf(
-            SettingsRowModel.StatusOrOptionRow(
-                id = "epg_sources",
-                title = "EPG Quellen",
-                subtitle = state.epgSourcesSummary,
-                onClick = onRefreshEpgRequested
-            ),
-            SettingsRowModel.ValueRow(
-                id = "epg_past_days",
-                title = "Vergangene Tage, um EPG zu behalten",
-                valueText = state.epgPastDaysToKeep.toString(),
-                targetPickerPage = SettingsPageId.PICKER_EPG_PAST_DAYS
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "epg_descriptions",
-                title = "Programmbeschreibungen speichern",
-                checked = state.epgStoreProgramDescriptions,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(epgStoreProgramDescriptions = enabled) } }
-            ),
-            SettingsRowModel.SectionHeader(
-                id = "epg_header_update",
-                title = "Update-Optionen"
-            ),
-            SettingsRowModel.ValueRow(
-                id = "epg_interval",
-                title = "Aktualisierungsintervall (Stunden)",
-                valueText = state.epgUpdateIntervalHours.toString(),
-                targetPickerPage = SettingsPageId.PICKER_EPG_INTERVAL
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "epg_update_start",
-                title = "Aktualisieren beim starten der App",
-                checked = state.epgUpdateOnAppStart,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(epgUpdateOnAppStart = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "epg_update_playlist",
-                title = "Aktualisieren bei Playlisten-Änderung",
-                checked = state.epgUpdateOnPlaylistChange,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(epgUpdateOnPlaylistChange = enabled) } }
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "epg_refresh_now",
-                title = "Aktualisieren",
-                onClick = onRefreshEpgRequested
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "epg_clear",
-                title = "Löschen",
-                onClick = {
-                    onClearEpgRequested()
-                    AetherSettingsStore.updateState {
-                        it.copy(
-                            epgLastUpdatedChannelsCount = 0,
-                            epgLastUpdatedTimestamp = "Cache geleert"
-                        )
-                    }
-                }
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "epg_status",
-                title = "Letzter Aktualisierungsstatus",
-                subtitle = "EPG wurde für ${state.epgLastUpdatedChannelsCount} Kanäle auf ${state.epgLastUpdatedTimestamp} erfolgreich aktualisiert",
-                onClick = onRefreshEpgRequested
-            )
-        )
-
-        SettingsPageId.APPEARANCE -> listOf(
-            SettingsRowModel.NavRow("opt_epg", "EPG", targetPage = SettingsPageId.APPEARANCE_EPG),
-            SettingsRowModel.NavRow("opt_player", "Player", targetPage = SettingsPageId.APPEARANCE_PLAYER),
-            SettingsRowModel.NavRow("opt_groups", "Gruppen", targetPage = SettingsPageId.APPEARANCE_GROUPS),
-            SettingsRowModel.NavRow("opt_logos", "Logos", targetPage = SettingsPageId.APPEARANCE_LOGOS),
-            SettingsRowModel.ValueRow(
-                id = "opt_language",
-                title = "Sprache",
-                valueText = state.language,
-                targetPickerPage = SettingsPageId.PICKER_LANGUAGE
-            ),
-            SettingsRowModel.ValueRow(
-                id = "opt_font_size",
-                title = "Schriftgröße",
-                valueText = state.fontSizePreset,
-                targetPickerPage = SettingsPageId.PICKER_FONT_SIZE
-            ),
-            SettingsRowModel.ValueRow(
-                id = "opt_theme",
-                title = "Farbthema",
-                valueText = state.colorTheme,
-                targetPickerPage = SettingsPageId.PICKER_COLOR_THEME
-            ),
-            SettingsRowModel.ValueRow(
-                id = "opt_transparency",
-                title = "Transparenz der Benutzeroberfläche (%)",
-                valueText = state.uiTransparencyPercent.toString(),
-                targetPickerPage = SettingsPageId.PICKER_UI_TRANSPARENCY
-            )
-        )
-
-        SettingsPageId.PLAYBACK -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "pb_buffer",
-                title = "Puffergröße",
-                valueText = state.bufferSizePreset,
-                targetPickerPage = SettingsPageId.PICKER_BUFFER_SIZE
-            ),
-            SettingsRowModel.ValueRow(
-                id = "pb_audio_dec",
-                title = "Audio Decoder",
-                valueText = state.audioDecoder,
-                targetPickerPage = SettingsPageId.PICKER_AUDIO_DECODER
-            ),
-            SettingsRowModel.ValueRow(
-                id = "pb_video_dec",
-                title = "Video Decoder",
-                valueText = state.videoDecoder,
-                targetPickerPage = SettingsPageId.PICKER_VIDEO_DECODER
-            ),
-            SettingsRowModel.ValueRow(
-                id = "pb_afr",
-                title = "Automatische Anpassung der Framerate (AFR)",
-                valueText = state.autoFrameRateMode,
-                targetPickerPage = SettingsPageId.PICKER_AFR
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "pb_surround",
-                title = "Wähle standardmäßig die Surround-Audiospur aus",
-                checked = state.defaultSurroundAudioTrack,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(defaultSurroundAudioTrack = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "pb_passthrough",
-                title = "Audio-Passthrough",
-                checked = state.audioPassthrough,
-                onToggle = { enabled ->
-                    AetherSettingsStore.updateState { it.copy(audioPassthrough = enabled) }
-                    onAudioPassthroughChanged(enabled)
-                }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "pb_tunneling",
-                title = "Getunnelte Wiedergabe",
-                checked = state.tunneledPlayback,
-                onToggle = { enabled ->
-                    AetherSettingsStore.updateState { it.copy(tunneledPlayback = enabled) }
-                    onTunneledPlaybackChanged(enabled)
-                }
-            ),
-            SettingsRowModel.ValueRow(
-                id = "pb_amlogic",
-                title = "Amlogic Fix",
-                valueText = state.amlogicFix,
-                targetPickerPage = SettingsPageId.PICKER_AMLOGIC_FIX
-            ),
-            SettingsRowModel.ValueRow(
-                id = "pb_ext_player",
-                title = "Externen Player nutzen",
-                valueText = state.useExternalPlayer,
-                targetPickerPage = SettingsPageId.PICKER_EXTERNAL_PLAYER
-            )
-        )
-
-        SettingsPageId.REMOTE -> listOf(
-            SettingsRowModel.NavRow("rem_epg", "EPG", targetPage = SettingsPageId.REMOTE_EPG),
-            SettingsRowModel.NavRow("rem_player", "Player", targetPage = SettingsPageId.REMOTE_PLAYER),
-            SettingsRowModel.SectionHeader(
-                id = "rem_header_seek",
-                title = "Suchoptionen"
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "rem_rw_ff_pause",
-                title = "Verwende RW / FF / Pause zum Suchen / Pausieren, während du anschaust",
-                checked = state.useRwFfPauseForSeeking,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(useRwFfPauseForSeeking = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "rem_rw_live",
-                title = "Verwende RW, um den Live-Stream zurückzuspulen",
-                checked = state.useRwToRewindLiveStream,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(useRwToRewindLiveStream = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "rem_lr_seek",
-                title = "Verwende Links / Rechts zum Suchen, während du suchst",
-                checked = state.useLeftRightForSeeking,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(useLeftRightForSeeking = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "rem_left_live",
-                title = "Verwende Links, um den Live-Stream zurückzuspulen",
-                checked = state.useLeftToRewindLiveStream,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(useLeftToRewindLiveStream = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "rem_ud_catchup",
-                title = "Verwende Down / Up zum Suchen, während du den Catchup schaust",
-                checked = state.useDownUpForCatchupSeeking,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(useDownUpForCatchupSeeking = enabled) } }
-            )
-        )
-
-        SettingsPageId.PARENTAL -> listOf(
-            SettingsRowModel.ToggleRow(
-                id = "par_enable",
-                title = if (state.parentalControlEnabled) "Ein" else "Aus",
-                checked = state.parentalControlEnabled,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalControlEnabled = enabled) } }
-            ),
-            SettingsRowModel.ValueRow(
-                id = "par_change_pin",
-                title = "PIN ändern",
-                valueText = "Aktuelle PIN: ****",
-                onClick = {
-                    val rotatedPin = if (state.parentalPinCode == "0000") "1234" else "0000"
-                    AetherSettingsStore.updateState { it.copy(parentalPinCode = rotatedPin) }
-                }
-            ),
-            SettingsRowModel.ValueRow(
-                id = "par_pin_method",
-                title = "PIN Eingabemethode",
-                valueText = state.parentalPinInputMethod,
-                targetPickerPage = SettingsPageId.PICKER_PIN_METHOD
-            ),
-            SettingsRowModel.ValueRow(
-                id = "par_pin_timeout",
-                title = "Nach dem Entsperren ist keine PIN erforderlich",
-                valueText = state.parentalPinLockTimeout,
-                targetPickerPage = SettingsPageId.PICKER_PIN_TIMEOUT
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "par_no_pin_channels",
-                title = "Nur für Sender nicht erforderlich",
-                checked = state.parentalNotRequiredForChannels,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalNotRequiredForChannels = enabled) } }
-            ),
-            SettingsRowModel.SectionHeader(
-                id = "par_header_required",
-                title = "PIN benötigt für"
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "par_req_settings",
-                title = "Einstellungen",
-                checked = state.parentalPinForSettings,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalPinForSettings = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "par_req_playlists",
-                title = "Einstellungen | Playlists",
-                checked = state.parentalPinForPlaylists,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalPinForPlaylists = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "par_req_epg",
-                title = "Einstellungen | EPG",
-                checked = state.parentalPinForEpg,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalPinForEpg = enabled) } }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "par_req_channel_opts",
-                title = "Kanaloptionen",
-                checked = state.parentalPinForChannelOptions,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(parentalPinForChannelOptions = enabled) } }
-            )
-        )
-
-        SettingsPageId.MISC -> listOf(
-            SettingsRowModel.NavRow("misc_search", "Suchen", targetPage = SettingsPageId.MISC_SEARCH),
-            SettingsRowModel.NavRow("misc_reminders", "Erinnerungen", targetPage = SettingsPageId.MISC_REMINDERS),
-            SettingsRowModel.NavRow("misc_recording", "Aufnahme", targetPage = SettingsPageId.MISC_RECORDING),
-            SettingsRowModel.NavRow("misc_vod", "VOD", targetPage = SettingsPageId.MISC_VOD)
-        )
-
-        SettingsPageId.ABOUT -> listOf(
-            SettingsRowModel.StatusOrOptionRow(
-                id = "about_version",
-                title = "Aether Stream Engine",
-                subtitle = "Version L10-V5.0 (TiviMate Enterprise Architecture)",
-                onClick = {}
-            ),
-            SettingsRowModel.StatusOrOptionRow(
-                id = "about_media3",
-                title = "Native Player Pipeline",
-                subtitle = "AndroidX Media3 1.4.1 • Hardware SurfaceView • Ktor 3.0.0",
-                onClick = {}
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "about_auto_update",
-                title = "Automatisch auf Updates prüfen",
-                checked = state.autoCheckForUpdates,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(autoCheckForUpdates = enabled) } }
-            )
-        )
-
-        SettingsPageId.APPEARANCE_EPG -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "app_epg_slot",
-                title = "Zeitachsen-Intervall (Minuten)",
-                valueText = "${state.epgTimelineSlotMinutes} Min.",
-                onClick = {
-                    val next = if (state.epgTimelineSlotMinutes == 30) 60 else 30
-                    AetherSettingsStore.updateState { it.copy(epgTimelineSlotMinutes = next) }
-                }
-            ),
-            SettingsRowModel.ToggleRow(
-                id = "app_epg_desc",
-                title = "Programminformationen im oberen Detail-Panel anzeigen",
-                checked = state.epgStoreProgramDescriptions,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(epgStoreProgramDescriptions = enabled) } }
-            )
-        )
-
-        SettingsPageId.APPEARANCE_PLAYER -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "app_player_timeout",
-                title = "Anzeigedauer der Vollbild-Steuerleiste",
-                valueText = "${state.playerHudTimeoutSeconds} Sekunden",
-                onClick = {
-                    val next = when (state.playerHudTimeoutSeconds) {
-                        3 -> 5
-                        5 -> 8
-                        8 -> 10
-                        else -> 3
-                    }
-                    AetherSettingsStore.updateState { it.copy(playerHudTimeoutSeconds = next) }
-                }
-            )
-        )
-
-        SettingsPageId.APPEARANCE_GROUPS -> listOf(
-            SettingsRowModel.ToggleRow(
-                id = "app_grp_nums",
-                title = "Kanalnummern in Kategorien anzeigen",
-                checked = state.showChannelNumbersInGroups,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(showChannelNumbersInGroups = enabled) } }
-            )
-        )
-
-        SettingsPageId.APPEARANCE_LOGOS -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "app_logo_prio",
-                title = "Logo-Priorität",
-                valueText = state.logoPriority,
-                onClick = {
-                    val next = if (state.logoPriority == "Wiedergabeliste bevorzugen") {
-                        "EPG-Logos bevorzugen"
-                    } else {
-                        "Wiedergabeliste bevorzugen"
-                    }
-                    AetherSettingsStore.updateState { it.copy(logoPriority = next) }
-                }
-            )
-        )
-
-        SettingsPageId.REMOTE_EPG -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "rem_epg_mode",
-                title = "D-Pad Navigation im TV-Guide",
-                valueText = state.remoteEpgDpadMode,
-                onClick = {}
-            )
-        )
-
-        SettingsPageId.REMOTE_PLAYER -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "rem_player_ok",
-                title = "OK-Taste im Vollbildmodus",
-                valueText = state.remotePlayerOkAction,
-                onClick = {}
-            )
-        )
-
-        SettingsPageId.MISC_SEARCH -> listOf(
-            SettingsRowModel.ToggleRow(
-                id = "misc_search_hist",
-                title = "Suchverlauf automatisch speichern",
-                checked = state.keepSearchHistory,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(keepSearchHistory = enabled) } }
-            )
-        )
-
-        SettingsPageId.MISC_REMINDERS -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "misc_rem_lead",
-                title = "Vorlaufzeit für Programm-Erinnerungen",
-                valueText = "${state.reminderLeadTimeMinutes} Minuten",
-                onClick = {
-                    val next = if (state.reminderLeadTimeMinutes == 2) 5 else 2
-                    AetherSettingsStore.updateState { it.copy(reminderLeadTimeMinutes = next) }
-                }
-            )
-        )
-
-        SettingsPageId.MISC_RECORDING -> listOf(
-            SettingsRowModel.ValueRow(
-                id = "misc_rec_pad",
-                title = "Nachlaufzeit bei Aufnahmen",
-                valueText = "${state.recordingPaddingMinutes} Minuten",
-                onClick = {
-                    val next = if (state.recordingPaddingMinutes == 5) 10 else 5
-                    AetherSettingsStore.updateState { it.copy(recordingPaddingMinutes = next) }
-                }
-            )
-        )
-
-        SettingsPageId.MISC_VOD -> listOf(
-            SettingsRowModel.ToggleRow(
-                id = "misc_vod_resume",
-                title = "Filme & Serien automatisch an letzter Position fortsetzen",
-                checked = state.vodAutoResumePlayback,
-                onToggle = { enabled -> AetherSettingsStore.updateState { it.copy(vodAutoResumePlayback = enabled) } }
-            )
-        )
-
-        SettingsPageId.PICKER_USER_AGENT -> buildPickerRows(
-            options = listOf("VLC", "TiviMate/4.7.0 (Linux; Android 11)", "ExoPlayer/1.4.1", "Lavf/60.3.100"),
-            selected = state.userAgent,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(userAgent = chosen) }
-                onUserAgentChanged(chosen)
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_UDP_PROXY -> buildPickerRows(
-            options = listOf("Nicht festgelegt", "127.0.0.1:4022", "192.168.1.1:4000", "192.168.178.1:4022"),
-            selected = state.udpProxy,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(udpProxy = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_EPG_PAST_DAYS -> buildPickerRows(
-            options = listOf("1", "3", "7", "14"),
-            selected = state.epgPastDaysToKeep.toString(),
-            onSelect = { chosen ->
-                val days = chosen.toIntOrNull() ?: 7
-                AetherSettingsStore.updateState { it.copy(epgPastDaysToKeep = days) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_EPG_INTERVAL -> buildPickerRows(
-            options = listOf("1", "2", "4", "6", "12", "24"),
-            selected = state.epgUpdateIntervalHours.toString(),
-            onSelect = { chosen ->
-                val hours = chosen.toIntOrNull() ?: 2
-                AetherSettingsStore.updateState { it.copy(epgUpdateIntervalHours = hours) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_LANGUAGE -> buildPickerRows(
-            options = listOf("System", "Deutsch", "English", "Türkçe", "Polski"),
-            selected = state.language,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(language = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_FONT_SIZE -> buildPickerRows(
-            options = listOf("Klein", "Mittel", "Groß", "Sehr groß"),
-            selected = state.fontSizePreset,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(fontSizePreset = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_COLOR_THEME -> buildPickerRows(
-            options = listOf("Dunkel • Blau", "Obsidian • Cyan", "Schwarz • Smaragd", "Dunkel • Bernstein"),
-            selected = state.colorTheme,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(colorTheme = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_UI_TRANSPARENCY -> buildPickerRows(
-            options = listOf("0", "20", "35", "50", "65", "80"),
-            selected = state.uiTransparencyPercent.toString(),
-            onSelect = { chosen ->
-                val pct = chosen.toIntOrNull() ?: 50
-                AetherSettingsStore.updateState { it.copy(uiTransparencyPercent = pct) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_BUFFER_SIZE -> buildPickerRows(
-            options = listOf("Keine", "Klein", "Mittel", "Groß", "Sehr groß"),
-            selected = state.bufferSizePreset,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(bufferSizePreset = chosen) }
-                onBufferPresetChanged(chosen)
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_AUDIO_DECODER -> buildPickerRows(
-            options = listOf("Hardware", "Software"),
-            selected = state.audioDecoder,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(audioDecoder = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_VIDEO_DECODER -> buildPickerRows(
-            options = listOf("Hardware", "Software"),
-            selected = state.videoDecoder,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(videoDecoder = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_AFR -> buildPickerRows(
-            options = listOf("Aus", "Einschalten", "Einschalten (mit Umschalt-Verzögerung)"),
-            selected = state.autoFrameRateMode,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(autoFrameRateMode = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_AMLOGIC_FIX -> buildPickerRows(
-            options = listOf("Aus", "Ein"),
-            selected = state.amlogicFix,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(amlogicFix = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_EXTERNAL_PLAYER -> buildPickerRows(
-            options = listOf("Nein", "Ja", "Nur für VOD"),
-            selected = state.useExternalPlayer,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(useExternalPlayer = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_PIN_METHOD -> buildPickerRows(
-            options = listOf("Sammler", "Zifferntasten", "Virtuelle Tastatur"),
-            selected = state.parentalPinInputMethod,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(parentalPinInputMethod = chosen) }
-                onPopStack()
-            }
-        )
-
-        SettingsPageId.PICKER_PIN_TIMEOUT -> buildPickerRows(
-            options = listOf("Immer erforderlich", "15 Minuten", "30 Minuten", "1 Stunde", "Bis zum App-Neustart"),
-            selected = state.parentalPinLockTimeout,
-            onSelect = { chosen ->
-                AetherSettingsStore.updateState { it.copy(parentalPinLockTimeout = chosen) }
-                onPopStack()
-            }
-        )
-    }
+    pageId: SettingsPageId, state: AetherSettingsState, onPopStack: () -> Unit,
+    onAddPlaylistRequested: () -> Unit, onRefreshPlaylistsRequested: () -> Unit, onRefreshEpgRequested: () -> Unit, onClearEpgRequested: () -> Unit,
+    onBufferPresetChanged: (String) -> Unit, onUserAgentChanged: (String) -> Unit, onTunneledPlaybackChanged: (Boolean) -> Unit, onAudioPassthroughChanged: (Boolean) -> Unit
+): List<SettingsRowModel> = when (pageId) {
+    SettingsPageId.ROOT -> listOf(
+        SettingsRowModel.NavRow("r_gen", "Allgemein", "Startverhalten, User-Agent & Backup", SettingsPageId.GENERAL),
+        SettingsRowModel.NavRow("r_pl", "Wiedergabelisten", "${state.activePlaylistName} (${state.activePlaylistChannelsCount} TV, ${state.activePlaylistMoviesCount} Filme)", SettingsPageId.PLAYLISTS),
+        SettingsRowModel.NavRow("r_epg", "EPG", state.epgLastUpdatedTimestamp, SettingsPageId.EPG),
+        SettingsRowModel.NavRow("r_app", "Optik", "${state.colorTheme} • Schrift: ${state.fontSizePreset}", SettingsPageId.APPEARANCE),
+        SettingsRowModel.NavRow("r_pb", "Wiedergabe", "Puffer: ${state.bufferSizePreset} • AFR: ${state.autoFrameRateMode}", SettingsPageId.PLAYBACK),
+        SettingsRowModel.NavRow("r_rem", "Fernbedienung", "Tastenbelegung & Spulverhalten", SettingsPageId.REMOTE),
+        SettingsRowModel.NavRow("r_par", "Kindersicherung", if (state.parentalControlEnabled) "Aktiviert (PIN geschützt)" else "Aus", SettingsPageId.PARENTAL),
+        SettingsRowModel.NavRow("r_misc", "Sonstiges", "Suche, Erinnerungen, Aufnahme & VOD", SettingsPageId.MISC),
+        SettingsRowModel.NavRow("r_ab", "Über", "Aether Stream Engine L10-V6.0", SettingsPageId.ABOUT)
+    )
+    SettingsPageId.GENERAL -> listOf(
+        SettingsRowModel.ToggleRow("g_boot", "Automatisch nach dem Booten starten", checked = state.autoStartOnBoot) { AetherSettingsStore.updateState { s -> s.copy(autoStartOnBoot = it) } },
+        SettingsRowModel.ToggleRow("g_sleep", "Automatisch aus dem Sleep Mode starten", checked = state.autoWakeFromSleep) { AetherSettingsStore.updateState { s -> s.copy(autoWakeFromSleep = it) } },
+        SettingsRowModel.ToggleRow("g_last", "Zuletzt angesehenen Sender beim Start anzeigen", checked = state.openLastChannelOnStart) { AetherSettingsStore.updateState { s -> s.copy(openLastChannelOnStart = it) } },
+        SettingsRowModel.ToggleRow("g_pip", "Bild-in-Bild Modus beim Drücken von Home", checked = state.autoPipOnHome) { AetherSettingsStore.updateState { s -> s.copy(autoPipOnHome = it) } },
+        SettingsRowModel.ToggleRow("g_back", "Doppelt bestätigen zum Verlassen", checked = state.confirmExitWithDoubleBack) { AetherSettingsStore.updateState { s -> s.copy(confirmExitWithDoubleBack = it) } },
+        SettingsRowModel.ValueRow("g_ua", "User-Agent (für Stream & CDN)", state.userAgent, SettingsPageId.PICKER_USER_AGENT),
+        SettingsRowModel.ValueRow("g_udp", "UDP Proxy (Adresse:Port)", state.udpProxy, SettingsPageId.PICKER_UDP_PROXY),
+        SettingsRowModel.StatusOrOptionRow("g_bak", "Daten sichern", state.lastBackupStatus) { AetherSettingsStore.updateState { it.copy(lastBackupStatus = "✓ Lokales Backup erfolgreich gesichert") } },
+        SettingsRowModel.StatusOrOptionRow("g_res", "Daten wiederherstellen", "Aus letztem Snapshot laden") { AetherSettingsStore.updateState { it.copy(lastBackupStatus = "✓ Einstellungen wiederhergestellt") } }
+    )
+    SettingsPageId.PLAYLISTS -> listOf(
+        SettingsRowModel.StatusOrOptionRow("p_act", state.activePlaylistName, "TV: ${state.activePlaylistChannelsCount} • Filme: ${state.activePlaylistMoviesCount} • Serien: ${state.activePlaylistSeriesCount}", showCheckmarkCircle = true, onClick = onRefreshPlaylistsRequested),
+        SettingsRowModel.StatusOrOptionRow("p_add", "Wiedergabeliste hinzufügen / ändern", "Xtream Codes Server-Login öffnen", onClick = onAddPlaylistRequested),
+        SettingsRowModel.StatusOrOptionRow("p_ref", "Aktualisiere alle Wiedergabelisten (TV, Filme & Serien)", "Status: ${state.epgLastUpdatedTimestamp}", onClick = onRefreshPlaylistsRequested)
+    )
+    SettingsPageId.EPG -> listOf(
+        SettingsRowModel.StatusOrOptionRow("e_src", "EPG Quellen", state.epgSourcesSummary, onClick = onRefreshEpgRequested),
+        SettingsRowModel.ValueRow("e_days", "Vergangene Tage behalten", "${state.epgPastDaysToKeep} Tage", SettingsPageId.PICKER_EPG_PAST_DAYS),
+        SettingsRowModel.ToggleRow("e_desc", "Programmbeschreibungen speichern", checked = state.epgStoreProgramDescriptions) { AetherSettingsStore.updateState { s -> s.copy(epgStoreProgramDescriptions = it) } },
+        SettingsRowModel.SectionHeader("e_hdr", "Update-Optionen"),
+        SettingsRowModel.ValueRow("e_int", "Aktualisierungsintervall (Stunden)", "${state.epgUpdateIntervalHours} Std.", SettingsPageId.PICKER_EPG_INTERVAL),
+        SettingsRowModel.ToggleRow("e_st", "Aktualisieren beim Starten der App", checked = state.epgUpdateOnAppStart) { AetherSettingsStore.updateState { s -> s.copy(epgUpdateOnAppStart = it) } },
+        SettingsRowModel.ToggleRow("e_pl", "Aktualisieren bei Playlisten-Änderung", checked = state.epgUpdateOnPlaylistChange) { AetherSettingsStore.updateState { s -> s.copy(epgUpdateOnPlaylistChange = it) } },
+        SettingsRowModel.StatusOrOptionRow("e_now", "⚡ EPG & Katalog jetzt aktualisieren", "Drücke [OK] für sofortigen Server-Abruf (${state.epgLastUpdatedTimestamp})", onClick = onRefreshEpgRequested),
+        SettingsRowModel.StatusOrOptionRow("e_clr", "EPG-Cache löschen", "Erzwingt kompletten Neuaufbau") { onClearEpgRequested() },
+        SettingsRowModel.StatusOrOptionRow("e_stat", "Letzter Aktualisierungsstatus", "Kanäle: ${state.epgLastUpdatedChannelsCount} • Stand: ${state.epgLastUpdatedTimestamp}", onClick = onRefreshEpgRequested)
+    )
+    SettingsPageId.APPEARANCE -> listOf(
+        SettingsRowModel.ValueRow("a_theme", "Farbthema (Live-Akzentfarbe)", state.colorTheme, SettingsPageId.PICKER_COLOR_THEME),
+        SettingsRowModel.ValueRow("a_font", "Schriftgröße (Menü & EPG)", state.fontSizePreset, SettingsPageId.PICKER_FONT_SIZE),
+        SettingsRowModel.ValueRow("a_trans", "Transparenz der Oberfläche (%)", "${state.uiTransparencyPercent} %", SettingsPageId.PICKER_UI_TRANSPARENCY),
+        SettingsRowModel.ValueRow("a_lang", "Sprache", state.language, SettingsPageId.PICKER_LANGUAGE),
+        SettingsRowModel.NavRow("a_epg", "EPG-Optik", "Zeitachsen-Intervall: ${state.epgTimelineSlotMinutes} Min.", SettingsPageId.APPEARANCE_EPG),
+        SettingsRowModel.NavRow("a_pl", "Player-Optik", "HUD-Einblendzeit: ${state.playerHudTimeoutSeconds} Sek.", SettingsPageId.APPEARANCE_PLAYER),
+        SettingsRowModel.NavRow("a_grp", "Gruppen-Optik", if (state.showChannelNumbersInGroups) "Kanalnummern eingeblendet" else "Kanalnummern ausgeblendet", SettingsPageId.APPEARANCE_GROUPS),
+        SettingsRowModel.NavRow("a_log", "Logo-Priorität", state.logoPriority, SettingsPageId.APPEARANCE_LOGOS)
+    )
+    SettingsPageId.PLAYBACK -> listOf(
+        SettingsRowModel.ValueRow("pb_buf", "Puffergröße", state.bufferSizePreset, SettingsPageId.PICKER_BUFFER_SIZE),
+        SettingsRowModel.ValueRow("pb_adec", "Audio Decoder", state.audioDecoder, SettingsPageId.PICKER_AUDIO_DECODER),
+        SettingsRowModel.ValueRow("pb_vdec", "Video Decoder", state.videoDecoder, SettingsPageId.PICKER_VIDEO_DECODER),
+        SettingsRowModel.ValueRow("pb_afr", "Automatische Framerate-Anpassung (AFR)", state.autoFrameRateMode, SettingsPageId.PICKER_AFR),
+        SettingsRowModel.ToggleRow("pb_sur", "Standardmäßig Surround-Audiospur bevorzugen", checked = state.defaultSurroundAudioTrack) { AetherSettingsStore.updateState { s -> s.copy(defaultSurroundAudioTrack = it) } },
+        SettingsRowModel.ToggleRow("pb_pass", "Audio-Passthrough (HDMI Bitstream)", checked = state.audioPassthrough) { AetherSettingsStore.updateState { s -> s.copy(audioPassthrough = it) }; onAudioPassthroughChanged(it) },
+        SettingsRowModel.ToggleRow("pb_tun", "Getunnelte Hardware-Wiedergabe", checked = state.tunneledPlayback) { AetherSettingsStore.updateState { s -> s.copy(tunneledPlayback = it) }; onTunneledPlaybackChanged(it) },
+        SettingsRowModel.ValueRow("pb_aml", "Amlogic / FireTV Cube Fix", state.amlogicFix, SettingsPageId.PICKER_AMLOGIC_FIX),
+        SettingsRowModel.ValueRow("pb_ext", "Externen Player nutzen", state.useExternalPlayer, SettingsPageId.PICKER_EXTERNAL_PLAYER)
+    )
+    SettingsPageId.REMOTE -> listOf(
+        SettingsRowModel.NavRow("rm_epg", "EPG-Tasten", state.remoteEpgDpadMode, SettingsPageId.REMOTE_EPG),
+        SettingsRowModel.NavRow("rm_pl", "Player-Tasten", state.remotePlayerOkAction, SettingsPageId.REMOTE_PLAYER),
+        SettingsRowModel.SectionHeader("rm_hdr", "Spul- & Suchoptionen"),
+        SettingsRowModel.ToggleRow("rm_rw", "RW / FF / Pause zum Spulen & Pausieren nutzen", checked = state.useRwFfPauseForSeeking) { AetherSettingsStore.updateState { s -> s.copy(useRwFfPauseForSeeking = it) } },
+        SettingsRowModel.ToggleRow("rm_lr", "Links / Rechts zum Spulen in VOD nutzen", checked = state.useLeftRightForSeeking) { AetherSettingsStore.updateState { s -> s.copy(useLeftRightForSeeking = it) } }
+    )
+    SettingsPageId.PARENTAL -> listOf(
+        SettingsRowModel.ToggleRow("pa_en", "Kindersicherung aktivieren", checked = state.parentalControlEnabled) { AetherSettingsStore.updateState { s -> s.copy(parentalControlEnabled = it) } },
+        SettingsRowModel.ValueRow("pa_pin", "PIN-Code wechseln", "Aktuell: ${state.parentalPinCode}") { AetherSettingsStore.updateState { it.copy(parentalPinCode = if (state.parentalPinCode == "0000") "1234" else "0000") } },
+        SettingsRowModel.ValueRow("pa_met", "PIN Eingabemethode", state.parentalPinInputMethod, SettingsPageId.PICKER_PIN_METHOD),
+        SettingsRowModel.ValueRow("pa_to", "PIN Sperrzeitraum", state.parentalPinLockTimeout, SettingsPageId.PICKER_PIN_TIMEOUT)
+    )
+    SettingsPageId.MISC -> listOf(
+        SettingsRowModel.NavRow("m_s", "Suchen", if (state.keepSearchHistory) "Suchverlauf aktiv" else "Kein Verlauf", SettingsPageId.MISC_SEARCH),
+        SettingsRowModel.NavRow("m_r", "Erinnerungen", "Vorlauf: ${state.reminderLeadTimeMinutes} Min.", SettingsPageId.MISC_REMINDERS),
+        SettingsRowModel.NavRow("m_rec", "Aufnahme", "Nachlauf: ${state.recordingPaddingMinutes} Min.", SettingsPageId.MISC_RECORDING),
+        SettingsRowModel.NavRow("m_vod", "VOD (Filme & Serien)", if (state.vodAutoResumePlayback) "Auto-Fortsetzen aktiv" else "Immer von Anfang", SettingsPageId.MISC_VOD)
+    )
+    SettingsPageId.ABOUT -> listOf(
+        SettingsRowModel.StatusOrOptionRow("ab_1", "Aether Stream Engine", "Version L10-V6.0 (Fire TV Cube Edition)") {},
+        SettingsRowModel.StatusOrOptionRow("ab_2", "Native Media3 Pipeline", "AndroidX Media3 1.4.1 • PCM Audio-Sync ±5000ms • AFR") {},
+        SettingsRowModel.ToggleRow("ab_3", "Automatisch auf Updates prüfen", checked = state.autoCheckForUpdates) { AetherSettingsStore.updateState { s -> s.copy(autoCheckForUpdates = it) } }
+    )
+    SettingsPageId.APPEARANCE_EPG -> listOf(
+        SettingsRowModel.ValueRow("ae_1", "Zeitachsen-Intervall", "${state.epgTimelineSlotMinutes} Min.") { AetherSettingsStore.updateState { it.copy(epgTimelineSlotMinutes = if (state.epgTimelineSlotMinutes == 30) 60 else 30) } },
+        SettingsRowModel.ToggleRow("ae_2", "Programminformationen im Detail-Panel anzeigen", checked = state.epgStoreProgramDescriptions) { AetherSettingsStore.updateState { s -> s.copy(epgStoreProgramDescriptions = it) } }
+    )
+    SettingsPageId.APPEARANCE_PLAYER -> listOf(
+        SettingsRowModel.ValueRow("ap_1", "Anzeigedauer der Vollbild-Steuerleiste", "${state.playerHudTimeoutSeconds} Sekunden") {
+            val next = when (state.playerHudTimeoutSeconds) { 3 -> 5; 5 -> 8; 8 -> 10; else -> 3 }
+            AetherSettingsStore.updateState { it.copy(playerHudTimeoutSeconds = next) }
+        }
+    )
+    SettingsPageId.APPEARANCE_GROUPS -> listOf(
+        SettingsRowModel.ToggleRow("ag_1", "Kanalnummern in Kategorien anzeigen", checked = state.showChannelNumbersInGroups) { AetherSettingsStore.updateState { s -> s.copy(showChannelNumbersInGroups = it) } }
+    )
+    SettingsPageId.APPEARANCE_LOGOS -> listOf(
+        SettingsRowModel.ValueRow("al_1", "Logo-Priorität", state.logoPriority) {
+            AetherSettingsStore.updateState { it.copy(logoPriority = if (state.logoPriority == "Wiedergabeliste bevorzugen") "EPG-Logos bevorzugen" else "Wiedergabeliste bevorzugen") }
+        }
+    )
+    SettingsPageId.REMOTE_EPG -> listOf(SettingsRowModel.ValueRow("re_1", "D-Pad im TV-Guide", state.remoteEpgDpadMode) {})
+    SettingsPageId.REMOTE_PLAYER -> listOf(SettingsRowModel.ValueRow("rp_1", "OK-Taste im Vollbild", state.remotePlayerOkAction) {})
+    SettingsPageId.MISC_SEARCH -> listOf(SettingsRowModel.ToggleRow("ms_1", "Suchverlauf speichern", checked = state.keepSearchHistory) { AetherSettingsStore.updateState { s -> s.copy(keepSearchHistory = it) } })
+    SettingsPageId.MISC_REMINDERS -> listOf(SettingsRowModel.ValueRow("mr_1", "Vorlaufzeit", "${state.reminderLeadTimeMinutes} Min.") { AetherSettingsStore.updateState { it.copy(reminderLeadTimeMinutes = if (state.reminderLeadTimeMinutes == 2) 5 else 2) } })
+    SettingsPageId.MISC_RECORDING -> listOf(SettingsRowModel.ValueRow("mc_1", "Nachlaufzeit bei Aufnahmen", "${state.recordingPaddingMinutes} Min.") { AetherSettingsStore.updateState { it.copy(recordingPaddingMinutes = if (state.recordingPaddingMinutes == 5) 10 else 5) } })
+    SettingsPageId.MISC_VOD -> listOf(SettingsRowModel.ToggleRow("mv_1", "Filme & Serien automatisch fortsetzen", checked = state.vodAutoResumePlayback) { AetherSettingsStore.updateState { s -> s.copy(vodAutoResumePlayback = it) } })
+    SettingsPageId.PICKER_USER_AGENT -> buildPickerRows(listOf("TiviMate/5.1.0 (Linux; Android 11)", "TiviMate/4.7.0 (FireTV Cube)", "VLC/3.0.20 LibVLC/3.0.20", "ExoPlayer/1.4.1", "Kodi/21.0 (Linux; Android 11)", "Lavf/60.3.100"), state.userAgent) { AetherSettingsStore.updateState { s -> s.copy(userAgent = it) }; onUserAgentChanged(it); onPopStack() }
+    SettingsPageId.PICKER_UDP_PROXY -> buildPickerRows(listOf("Nicht festgelegt", "127.0.0.1:4022", "192.168.1.1:4000", "192.168.178.1:4022"), state.udpProxy) { AetherSettingsStore.updateState { s -> s.copy(udpProxy = it) }; onPopStack() }
+    SettingsPageId.PICKER_EPG_PAST_DAYS -> buildPickerRows(listOf("1", "3", "7", "14"), state.epgPastDaysToKeep.toString()) { AetherSettingsStore.updateState { s -> s.copy(epgPastDaysToKeep = it.toIntOrNull() ?: 7) }; onPopStack() }
+    SettingsPageId.PICKER_EPG_INTERVAL -> buildPickerRows(listOf("1", "2", "4", "6", "12", "24"), state.epgUpdateIntervalHours.toString()) { AetherSettingsStore.updateState { s -> s.copy(epgUpdateIntervalHours = it.toIntOrNull() ?: 2) }; onPopStack() }
+    SettingsPageId.PICKER_LANGUAGE -> buildPickerRows(listOf("System", "Deutsch", "Polski", "English", "Türkçe"), state.language) { AetherSettingsStore.updateState { s -> s.copy(language = it) }; onPopStack() }
+    SettingsPageId.PICKER_FONT_SIZE -> buildPickerRows(listOf("Klein", "Mittel", "Groß", "Sehr groß"), state.fontSizePreset) { AetherSettingsStore.updateState { s -> s.copy(fontSizePreset = it) }; onPopStack() }
+    SettingsPageId.PICKER_COLOR_THEME -> buildPickerRows(listOf("Obsidian • Cyan", "Dunkel • Blau", "Schwarz • Smaragd", "Dunkel • Bernstein"), state.colorTheme) { AetherSettingsStore.updateState { s -> s.copy(colorTheme = it) }; onPopStack() }
+    SettingsPageId.PICKER_UI_TRANSPARENCY -> buildPickerRows(listOf("0", "20", "35", "50", "65", "80"), state.uiTransparencyPercent.toString()) { AetherSettingsStore.updateState { s -> s.copy(uiTransparencyPercent = it.toIntOrNull() ?: 50) }; onPopStack() }
+    SettingsPageId.PICKER_BUFFER_SIZE -> buildPickerRows(listOf("Keine", "Klein", "Mittel", "Groß", "Sehr groß"), state.bufferSizePreset) { AetherSettingsStore.updateState { s -> s.copy(bufferSizePreset = it) }; onBufferPresetChanged(it); onPopStack() }
+    SettingsPageId.PICKER_AUDIO_DECODER -> buildPickerRows(listOf("Hardware", "Software"), state.audioDecoder) { AetherSettingsStore.updateState { s -> s.copy(audioDecoder = it) }; onPopStack() }
+    SettingsPageId.PICKER_VIDEO_DECODER -> buildPickerRows(listOf("Hardware", "Software"), state.videoDecoder) { AetherSettingsStore.updateState { s -> s.copy(videoDecoder = it) }; onPopStack() }
+    SettingsPageId.PICKER_AFR -> buildPickerRows(listOf("Aus", "Einschalten", "Einschalten (mit Umschalt-Verzögerung)"), state.autoFrameRateMode) { AetherSettingsStore.updateState { s -> s.copy(autoFrameRateMode = it) }; onPopStack() }
+    SettingsPageId.PICKER_AMLOGIC_FIX -> buildPickerRows(listOf("Aus", "Ein"), state.amlogicFix) { AetherSettingsStore.updateState { s -> s.copy(amlogicFix = it) }; onPopStack() }
+    SettingsPageId.PICKER_EXTERNAL_PLAYER -> buildPickerRows(listOf("Nein", "Ja", "Nur für VOD"), state.useExternalPlayer) { AetherSettingsStore.updateState { s -> s.copy(useExternalPlayer = it) }; onPopStack() }
+    SettingsPageId.PICKER_PIN_METHOD -> buildPickerRows(listOf("Sammler", "Zifferntasten", "Virtuelle Tastatur"), state.parentalPinInputMethod) { AetherSettingsStore.updateState { s -> s.copy(parentalPinInputMethod = it) }; onPopStack() }
+    SettingsPageId.PICKER_PIN_TIMEOUT -> buildPickerRows(listOf("Immer erforderlich", "15 Minuten", "30 Minuten", "1 Stunde", "Bis zum App-Neustart"), state.parentalPinLockTimeout) { AetherSettingsStore.updateState { s -> s.copy(parentalPinLockTimeout = it) }; onPopStack() }
 }
 
-private fun buildPickerRows(
-    options: List<String>,
-    selected: String,
-    onSelect: (String) -> Unit
-): List<SettingsRowModel> {
-    return options.mapIndexed { idx, option ->
-        SettingsRowModel.StatusOrOptionRow(
-            id = "picker_opt_$idx",
-            title = option,
-            isSelectedOption = (option == selected),
-            onClick = { onSelect(option) }
-        )
-    }
-}
+private fun buildPickerRows(options: List<String>, selected: String, onSelect: (String) -> Unit): List<SettingsRowModel> =
+    options.mapIndexed { idx, opt -> SettingsRowModel.StatusOrOptionRow("pk_$idx", opt, isSelectedOption = (opt == selected)) { onSelect(opt) } }
