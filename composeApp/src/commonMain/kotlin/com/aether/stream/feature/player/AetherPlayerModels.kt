@@ -59,7 +59,7 @@ interface AetherVideoPlayerEngine {
     fun selectAudioTrack(option: TrackOption)
     fun selectSubtitleTrack(option: TrackOption?)
     fun selectVideoTrack(option: TrackOption?) {}
-    fun cycleVideoAspectMode(): VideoAspectMode = VideoAspectMode.FIT
+    fun cycleVideoAspectMode() {}
     fun setVideoAspectMode(mode: VideoAspectMode) {}
     fun pause()
     fun resume()
@@ -67,10 +67,6 @@ interface AetherVideoPlayerEngine {
     fun seekRelativeMs(offsetMs: Long)
     fun release()
 
-    // ==========================================
-    // MODULE 1, 3 & 4: PREDICTIVE ZAP, TRACK MEMORY & AUDIO DELAY
-    // (Default-Implementierungen sichern 100% iOS/KMP Build-Kompatibilität)
-    // ==========================================
     fun prebufferAdjacentStreams(prevUrl: String?, nextUrl: String?) {}
     fun applySavedStreamTrackMemory(preferredAudioId: String?, preferredSubtitleId: String?, audioDelayMs: Int = 0) {}
     fun setAudioDelayOffsetMs(delayMs: Int) {}
